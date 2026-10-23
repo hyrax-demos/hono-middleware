@@ -336,8 +336,8 @@ describe('removed keys in a stateless session cookie', () => {
     })
     .patch('/session', async (c) => {
       await c.var.session.update((prevData) => {
-        const data = { ...prevData, sub }
-        delete data.role
+        const data: TestData = { ...prevData, sub }
+        delete data['role']
         return data
       })
       return c.json(c.var.session.data)
