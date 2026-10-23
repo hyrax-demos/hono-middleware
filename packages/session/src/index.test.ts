@@ -317,6 +317,86 @@ describe('session.update(fn)', () => {
   })
 })
 
+describe('removed keys in a stateless session cookie', () => {
+  const refresh = vi.fn<Refresh<TestData>>()
+
+  const app = new Hono()
+    .use(useSession<TestData>({ secret, duration: { absolute: offset * 3 } }))
+    .get('/session', async (c) => {
+      const data = await c.var.session.get()
+      return c.json(data)
+    })
+    .get('/session/refresh', async (c) => {
+      const data = await c.var.session.get(refresh)
+      return c.json(data)
+    })
+    .put('/session', async (c) => {
+      await c.var.session.update({ sub })
+      return c.json(c.var.session.data)
+    })
+    .patch('/session', async (c) => {
+      await c.var.session.update((prevData) => {
+        const data: TestData = { ...prevData, sub }
+        delete data['role']
+        return data
+      })
+      return c.json(c.var.session.data)
+    })
+
+  async function getNextSession(res: Response) {
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+    const next = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+    return { sessionCookie, data: await next.json() }
+  }
+
+  it('drops a key left out of update(data) on the next request', async () => {
+    // The current cookie holds a `role` key that the new data does not include
+    const cookie = await encrypt({ ...session.payload, iat: recent, role: 'admin', sub })
+    const res = await app.request('/session', {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { sessionCookie, data } = await getNextSession(res)
+
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('role')
+    expect(data).toStrictEqual({ sub })
+  })
+
+  it('drops a key removed by update(fn) on the next request', async () => {
+    // The current cookie holds a `role` key that the update function removes
+    const cookie = await encrypt({ ...session.payload, iat: recent, role: 'admin', sub })
+    const res = await app.request('/session', {
+      method: 'PATCH',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { sessionCookie, data } = await getNextSession(res)
+
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('role')
+    expect(data).toStrictEqual({ sub })
+  })
+
+  it('drops a key left out of the refreshed data on the next request', async () => {
+    // The expired cookie holds a `role` key that the refresh function does not return
+    refresh.mockResolvedValue({ sub })
+    const expiredSession = { ...session.payload, exp: recent, iat: recent, role: 'admin', sub }
+    const cookie = await encrypt(expiredSession)
+    const res = await app.request('/session/refresh', { headers: { cookie: `sid=${cookie}` } })
+    const { sessionCookie, data } = await getNextSession(res)
+
+    expect(refresh).toHaveBeenCalledWith({ role: 'admin', sub })
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('role')
+    expect(data).toStrictEqual({ sub })
+  })
+})
+
 describe('session.delete()', () => {
   const app = new Hono().delete('/session', useSession<TestData>({ secret }), async (c) => {
     c.var.session.delete()
