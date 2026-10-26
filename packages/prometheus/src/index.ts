@@ -1,13 +1,17 @@
 import type { Context, MiddlewareHandler, TypedResponse } from 'hono'
 import { createMiddleware } from 'hono/factory'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import type { DefaultMetricsCollectorConfiguration, RegistryContentType } from 'prom-client'
+import type {
+  DefaultMetricsCollectorConfiguration,
+  OpenMetricsContentType,
+  RegistryContentType,
+} from 'prom-client'
 import { Registry, collectDefaultMetrics as promCollectDefaultMetrics } from 'prom-client'
 import { createStandardMetrics } from './standardMetrics'
 import type { MetricOptions, CustomMetricsOptions } from './standardMetrics'
 
 interface PrometheusOptions {
-  registry?: Registry
+  registry?: Registry | Registry<OpenMetricsContentType>
   collectDefaultMetrics?: boolean | DefaultMetricsCollectorConfiguration<RegistryContentType>
   prefix?: string
   metricOptions?: Omit<CustomMetricsOptions, 'prefix' | 'register'>

@@ -1,6 +1,12 @@
 import type { Context } from 'hono'
 import { Counter, Histogram } from 'prom-client'
-import type { CounterConfiguration, HistogramConfiguration, Metric, Registry } from 'prom-client'
+import type {
+  CounterConfiguration,
+  HistogramConfiguration,
+  Metric,
+  OpenMetricsContentType,
+  Registry,
+} from 'prom-client'
 
 interface CounterOptions<T extends string> extends CounterConfiguration<T> {
   type: 'counter'
@@ -60,7 +66,7 @@ export const createStandardMetrics = ({
   prefix = '',
   customOptions,
 }: {
-  registry: Registry
+  registry: Registry | Registry<OpenMetricsContentType>
   prefix?: string
   customOptions?: CustomMetricsOptions
 }) => {
