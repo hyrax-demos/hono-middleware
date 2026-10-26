@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -181,6 +181,65 @@ describe('Prometheus middleware', () => {
         http_requests_total{method="GET",route="/",status="200",ok="true"} 1
         "
       `)
+    })
+
+    it('sends the Prometheus text content type of a default registry', async () => {
+      // Uses a registry created with no arguments, whose content type has a version parameter.
+      const app = new Hono()
+      const registry = new Registry()
+
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+    })
+
+    it('sends the Prometheus text content type when no registry is passed', async () => {
+      const app = new Hono()
+
+      const { printMetrics, registerMetrics } = prometheus()
+
+      app.use('*', registerMetrics)
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.headers.get('content-type')).toBe(Registry.PROMETHEUS_CONTENT_TYPE)
+    })
+
+    it('sends the OpenMetrics content type of an OpenMetrics registry', async () => {
+      // Uses a registry switched to the OpenMetrics content type, so the body is OpenMetrics text.
+      const app = new Hono()
+      const registry = new Registry<OpenMetricsContentType>()
+      registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      const { printMetrics, registerMetrics } = prometheus({
+        registry,
+        metricOptions: {
+          requestDuration: {
+            disabled: true,
+          },
+        },
+      })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(
+        'application/openmetrics-text; version=1.0.0; charset=utf-8'
+      )
+      expect(await response.text()).toContain('# EOF')
     })
   })
 })
