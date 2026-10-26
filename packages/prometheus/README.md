@@ -95,6 +95,8 @@ A prom-client Registry instance to store the metrics. If not provided, a new one
 
 Useful when you want to register some custom metrics while exposing them on the same `/metrics` endpoint that this middleware creates. In this case, you can create a Registry instance, register your custom metrics on that, and pass that into this option.
 
+The `/metrics` response uses the registry's content type as its `Content-Type` header, so a registry switched to `Registry.OPENMETRICS_CONTENT_TYPE` is served as OpenMetrics.
+
 ### `collectDefaultMetrics`
 
 Type: _boolean | [CollectDefaultMetricsOptions](https://www.npmjs.com/package/prom-client#default-metrics)_
