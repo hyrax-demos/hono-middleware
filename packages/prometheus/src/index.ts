@@ -1,13 +1,18 @@
 import type { Context, MiddlewareHandler, TypedResponse } from 'hono'
 import { createMiddleware } from 'hono/factory'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import type { DefaultMetricsCollectorConfiguration, RegistryContentType } from 'prom-client'
+import type {
+  DefaultMetricsCollectorConfiguration,
+  OpenMetricsContentType,
+  PrometheusContentType,
+  RegistryContentType,
+} from 'prom-client'
 import { Registry, collectDefaultMetrics as promCollectDefaultMetrics } from 'prom-client'
 import { createStandardMetrics } from './standardMetrics'
 import type { MetricOptions, CustomMetricsOptions } from './standardMetrics'
 
 interface PrometheusOptions {
-  registry?: Registry
+  registry?: Registry<PrometheusContentType> | Registry<OpenMetricsContentType>
   collectDefaultMetrics?: boolean | DefaultMetricsCollectorConfiguration<RegistryContentType>
   prefix?: string
   metricOptions?: Omit<CustomMetricsOptions, 'prefix' | 'register'>
@@ -53,7 +58,8 @@ export const prometheus = (
   })
 
   return {
-    printMetrics: async (c: Context) => c.text(await registry.metrics()),
+    printMetrics: async (c: Context) =>
+      c.text(await registry.metrics(), undefined, { 'Content-Type': registry.contentType }),
     registerMetrics: createMiddleware(async (c, next) => {
       const timer = metrics.requestDuration?.startTimer()
 
