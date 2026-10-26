@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -181,6 +181,37 @@ describe('Prometheus middleware', () => {
         http_requests_total{method="GET",route="/",status="200",ok="true"} 1
         "
       `)
+    })
+
+    it('sends the default registry content type on the /metrics endpoint', async () => {
+      // Uses a registry created without a content type argument
+      const app = new Hono()
+      const registry = new Registry()
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(registry.contentType)
+      expect(response.headers.get('content-type')).toBe(Registry.PROMETHEUS_CONTENT_TYPE)
+    })
+
+    it('sends the OpenMetrics content type when the registry uses OpenMetrics', async () => {
+      // Uses a registry switched to the OpenMetrics content type. prom-client's typings
+      // declare no constructor argument, so the type is set with setContentType()
+      const app = new Hono()
+      const registry = new Registry<OpenMetricsContentType>()
+      registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      // The body is in OpenMetrics format, which carries an EOF marker
+      expect(await response.text()).toContain('# EOF')
     })
   })
 })
