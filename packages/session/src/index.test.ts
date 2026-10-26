@@ -171,6 +171,7 @@ describe('session.get(refresh)', () => {
   it('drops keys left out of the refreshed data on the next request', async () => {
     // The expired cookie holds a `role` key that the refreshed data does not return
     const newSub = 'new-subject'
+    refresh.mockReset()
     refresh.mockResolvedValue({ sub: newSub })
     const expiredSession = { ...session.payload, exp: recent, iat: recent, role: 'admin', sub }
     const cookie = await encrypt(expiredSession)
