@@ -341,6 +341,87 @@ describe('session.delete()', () => {
   })
 })
 
+describe('stateless session cookie', () => {
+  const refresh = vi.fn<Refresh<TestData>>()
+  const sessionMiddleware = useSession<TestData>({ secret, duration: { absolute: offset * 3 } })
+
+  const app = new Hono()
+    .get('/session', sessionMiddleware, async (c) => {
+      const data = await c.var.session.get(refresh)
+      return c.json(data)
+    })
+    .put('/session/:sub', sessionMiddleware, async (c) => {
+      await c.var.session.update({ sub: c.req.param('sub') })
+      return c.json(c.var.session.data)
+    })
+    .patch('/session/:sub', sessionMiddleware, async (c) => {
+      await c.var.session.update(() => ({ sub: c.req.param('sub') }))
+      return c.json(c.var.session.data)
+    })
+
+  /**
+   * Send the session cookie from `res` with a new request and return the session data it holds.
+   */
+  async function getNextSessionData(res: Response) {
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+    const nextRes = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+    return { sessionCookie, nextData: await nextRes.json() }
+  }
+
+  it('removes keys left out of update(data) from the cookie', async () => {
+    // The current cookie holds an `aud` key that the new data does not have
+    const newSub = 'new-subject'
+    const cookie = await encrypt({ ...session.payload, aud: 'audience', iat: recent, sub })
+    const res = await app.request(`/session/${newSub}`, {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { sessionCookie, nextData } = await getNextSessionData(res)
+
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('aud')
+    expect(nextData).toStrictEqual({ sub: newSub })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('removes keys left out of the data returned by update(fn) from the cookie', async () => {
+    // The current cookie holds an `aud` key that the update function does not return
+    const newSub = 'new-subject'
+    const cookie = await encrypt({ ...session.payload, aud: 'audience', iat: recent, sub })
+    const res = await app.request(`/session/${newSub}`, {
+      method: 'PATCH',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { sessionCookie, nextData } = await getNextSessionData(res)
+
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('aud')
+    expect(nextData).toStrictEqual({ sub: newSub })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('removes keys left out of the refreshed data from the cookie', async () => {
+    // The expired cookie holds an `aud` key that the refresh function does not return
+    const newSub = 'new-subject'
+    refresh.mockResolvedValueOnce({ sub: newSub })
+    const expiredSession = { ...session.payload, aud: 'audience', exp: recent, iat: recent, sub }
+    const cookie = await encrypt(expiredSession)
+    const res = await app.request('/session', { headers: { cookie: `sid=${cookie}` } })
+    const { sessionCookie, nextData } = await getNextSessionData(res)
+
+    expect(res.status).toBe(200)
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(refresh).toHaveBeenCalledWith({ aud: 'audience', sub })
+    expect(sessionCookie?.payload.sid).toStrictEqual(sid)
+    expect(sessionCookie?.payload).not.toHaveProperty('aud')
+    expect(nextData).toStrictEqual({ sub: newSub })
+  })
+})
+
 describe('session.get() with storage', () => {
   const app = new Hono().get('/session', testSessionStorage, useSession({ secret }), async (c) => {
     const session = await c.var.session.get()
