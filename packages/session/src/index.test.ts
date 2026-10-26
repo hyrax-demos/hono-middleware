@@ -168,6 +168,29 @@ describe('session.get(refresh)', () => {
     expect(sessionCookie?.payload.sub).toStrictEqual(newSub)
   })
 
+  it('drops keys left out of the refreshed data on the next request', async () => {
+    // The expired cookie holds a `role` key that the refreshed data does not return
+    const newSub = 'new-subject'
+    refresh.mockResolvedValue({ sub: newSub })
+    const expiredSession = { ...session.payload, exp: recent, iat: recent, role: 'admin', sub }
+    const cookie = await encrypt(expiredSession)
+    const res = await app.request('/session', { headers: { cookie: `sid=${cookie}` } })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(refresh).toHaveBeenCalledWith({ role: 'admin', sub })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub: newSub })
+    expect(sessionCookie?.payload).not.toHaveProperty('role')
+
+    const nextRes = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(nextRes.status).toBe(200)
+    expect(await nextRes.json()).toStrictEqual({ sub: newSub })
+  })
+
   it('replaces the session when refresh returns null', async () => {
     refresh.mockResolvedValue(null)
     const expiredSession = { ...session.payload, exp: recent, iat: recent, sub }
@@ -208,10 +231,15 @@ describe('session.get(refresh)', () => {
 })
 
 describe('session.update()', () => {
-  const app = new Hono().put('/session/:sub', useSession<TestData>({ secret }), async (c) => {
-    await c.var.session.update({ sub: c.req.param('sub') })
-    return c.json(c.var.session.data)
-  })
+  const app = new Hono()
+    .get('/session', useSession<TestData>({ secret }), async (c) => {
+      const data = await c.var.session.get()
+      return c.json(data)
+    })
+    .put('/session/:sub', useSession<TestData>({ secret }), async (c) => {
+      await c.var.session.update({ sub: c.req.param('sub') })
+      return c.json(c.var.session.data)
+    })
 
   it('creates a new session with data', async () => {
     const res = await app.request(`/session/${sub}`, { method: 'PUT' })
@@ -268,13 +296,52 @@ describe('session.update()', () => {
     expect(sessionCookie?.payload.sid).not.toStrictEqual(expiredSession.sid)
     expect(sessionCookie?.payload.sub).toStrictEqual(newSub)
   })
+
+  it('drops keys left out of the new data on the next request', async () => {
+    // The current cookie holds a `role` key that the new data does not include
+    const newSub = 'new-subject'
+    const cookie = await encrypt({ ...session.payload, iat: recent, role: 'admin', sub })
+    const res = await app.request(`/session/${newSub}`, {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub: newSub })
+    expect(sessionCookie?.payload).toStrictEqual({
+      ...session.payload,
+      iat: recent,
+      sub: newSub,
+    })
+
+    const nextRes = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+
+    expect(nextRes.status).toBe(200)
+    expect(await nextRes.json()).toStrictEqual({ sub: newSub })
+  })
 })
 
 describe('session.update(fn)', () => {
-  const app = new Hono().put('/session/:sub', useSession<TestData>({ secret }), async (c) => {
-    await c.var.session.update((data) => ({ ...data, sub: c.req.param('sub') }))
-    return c.json(c.var.session.data)
-  })
+  const app = new Hono()
+    .get('/session', useSession<TestData>({ secret }), async (c) => {
+      const data = await c.var.session.get()
+      return c.json(data)
+    })
+    .put('/session/:sub', useSession<TestData>({ secret }), async (c) => {
+      await c.var.session.update((data) => ({ ...data, sub: c.req.param('sub') }))
+      return c.json(c.var.session.data)
+    })
+    .delete('/session/:key', useSession<TestData>({ secret }), async (c) => {
+      const key = c.req.param('key')
+      await c.var.session.update((data) => {
+        const entries = Object.entries(data ?? {}).filter(([k]) => k !== key)
+        return Object.fromEntries(entries) as TestData
+      })
+      return c.json(c.var.session.data)
+    })
 
   it('creates a new session with data', async () => {
     const res = await app.request(`/session/${sub}`, { method: 'PUT' })
@@ -314,6 +381,31 @@ describe('session.update(fn)', () => {
       iat: recent,
       sub: newSub,
     })
+  })
+
+  it('drops a key the update function removes on the next request', async () => {
+    // The current cookie holds a `role` key that the update function filters out
+    const cookie = await encrypt({ ...session.payload, iat: recent, role: 'admin', sub })
+    const res = await app.request('/session/role', {
+      method: 'DELETE',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub })
+    expect(sessionCookie?.payload).toStrictEqual({
+      ...session.payload,
+      iat: recent,
+      sub,
+    })
+
+    const nextRes = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+
+    expect(nextRes.status).toBe(200)
+    expect(await nextRes.json()).toStrictEqual({ sub })
   })
 })
 
