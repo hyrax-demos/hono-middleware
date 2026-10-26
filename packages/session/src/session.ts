@@ -235,10 +235,9 @@ export function getSession<Data extends SessionData>({
       payload = createCookie()
     }
 
-    // Merge session data with the stateless session cookie
+    // Replace the data in the stateless session cookie with the refreshed data
     if (!storage) {
-      const cookie = getStatelessCookie(payload, data)
-      payload = { ...cookie.payload, ...cookie.data }
+      payload = setStatelessCookie(payload, data)
     }
 
     return { action: 'update', payload, data }
@@ -271,14 +270,13 @@ export function getSession<Data extends SessionData>({
   /**
    * Update the session with new session data.
    *
-   * Optionally merges session data with a stateless session cookie.
+   * Without storage, the data in the stateless session cookie is replaced with the new data.
    */
   function updateSession(data: Data, payload?: cookies.CookiePayload): UpdateSession<Data> {
     payload ??= createCookie(data)
 
     if (!storage) {
-      const cookie = getStatelessCookie(payload, data)
-      payload = { ...cookie.payload, ...cookie.data }
+      payload = setStatelessCookie(payload, data)
     }
 
     return { action: 'update', payload, data }
@@ -287,7 +285,7 @@ export function getSession<Data extends SessionData>({
   /**
    * Create a session cookie with a new session id.
    *
-   * Optionally merges session data with a stateless session cookie.
+   * Without storage, the initial session data is stored in the stateless session cookie.
    */
   function createCookie(init?: SessionData): SessionCookie {
     // Always generate a new session id to avoid session fixation attacks
@@ -297,8 +295,7 @@ export function getSession<Data extends SessionData>({
       return payload
     }
 
-    const cookie = getStatelessCookie(payload, init)
-    return { ...cookie.payload, ...cookie.data }
+    return setStatelessCookie(payload, init)
   }
 
   /**
@@ -333,10 +330,19 @@ export function getSession<Data extends SessionData>({
 }
 
 /**
- * Shallow merge session data with the session cookie,
- * ensuring that the original `exp`, `iat`, and `sid` claims are preserved.
+ * Split a stateless session cookie into its `exp`, `iat`, and `sid` claims and the session data.
  */
-function getStatelessCookie(payload: SessionCookie, data?: SessionData | null) {
-  const { exp, iat, sid, ...rest } = payload
-  return { payload: { exp, iat, sid }, data: { ...rest, ...data } }
+function getStatelessCookie(payload: SessionCookie) {
+  const { exp, iat, sid, ...data } = payload
+  return { payload: { exp, iat, sid }, data }
+}
+
+/**
+ * Build a stateless session cookie from the `exp`, `iat`, and `sid` claims of `payload`
+ * and the given session data. Every other key of `payload` is dropped, so a key that
+ * `data` no longer has is removed from the cookie.
+ */
+function setStatelessCookie(payload: SessionCookie, data?: SessionData | null): SessionCookie {
+  const { payload: claims } = getStatelessCookie(payload)
+  return { ...claims, ...data }
 }
