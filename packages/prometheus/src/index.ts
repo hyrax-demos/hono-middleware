@@ -53,7 +53,10 @@ export const prometheus = (
   })
 
   return {
-    printMetrics: async (c: Context) => c.text(await registry.metrics()),
+    printMetrics: async (c: Context) =>
+      c.text(await registry.metrics(), 200, {
+        'Content-Type': registry.contentType,
+      }),
     registerMetrics: createMiddleware(async (c, next) => {
       const timer = metrics.requestDuration?.startTimer()
 
