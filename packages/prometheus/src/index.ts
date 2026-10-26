@@ -53,7 +53,12 @@ export const prometheus = (
   })
 
   return {
-    printMetrics: async (c: Context) => c.text(await registry.metrics()),
+    printMetrics: async (c: Context) => {
+      const res = c.text(await registry.metrics())
+      // Label the body with the registry's own format (Prometheus text or OpenMetrics)
+      res.headers.set('Content-Type', registry.contentType)
+      return res
+    },
     registerMetrics: createMiddleware(async (c, next) => {
       const timer = metrics.requestDuration?.startTimer()
 

@@ -182,5 +182,34 @@ describe('Prometheus middleware', () => {
         "
       `)
     })
+
+    it('sends the default registry content type on the /metrics endpoint', async () => {
+      // Uses a registry created without a content type argument
+      const app = new Hono()
+      const registry = new Registry()
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(registry.contentType)
+      expect(response.headers.get('content-type')).toBe(Registry.PROMETHEUS_CONTENT_TYPE)
+    })
+
+    it('sends the OpenMetrics content type when the registry uses OpenMetrics', async () => {
+      // Uses a registry created with the OpenMetrics content type
+      const app = new Hono()
+      const registry = new Registry(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      // The body is in OpenMetrics format, which carries an EOF marker
+      expect(await response.text()).toContain('# EOF')
+    })
   })
 })
