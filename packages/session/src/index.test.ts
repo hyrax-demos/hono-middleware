@@ -341,6 +341,99 @@ describe('session.delete()', () => {
   })
 })
 
+describe('stateless session cookie with removed keys', () => {
+  const refresh = vi.fn<Refresh<TestData>>()
+
+  const app = new Hono()
+    .get('/session', useSession<TestData>({ secret }), async (c) => {
+      const data = await c.var.session.get()
+      return c.json(data)
+    })
+    .get(
+      '/session/refresh',
+      useSession<TestData>({ secret, duration: { absolute: offset * 3 } }),
+      async (c) => {
+        const data = await c.var.session.get(refresh)
+        return c.json(data)
+      }
+    )
+    .put('/session/data/:sub', useSession<TestData>({ secret }), async (c) => {
+      await c.var.session.update({ sub: c.req.param('sub') })
+      return c.json(c.var.session.data)
+    })
+    .put('/session/fn', useSession<TestData>({ secret }), async (c) => {
+      await c.var.session.update((data) => {
+        const { aud: _aud, ...rest } = data ?? { sub }
+        return rest as TestData
+      })
+      return c.json(c.var.session.data)
+    })
+
+  /**
+   * Send the session cookie from a response on a new request,
+   * returning the session data read on that request.
+   */
+  async function getNextSession(res: Response) {
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+    const next = await app.request('/session', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+    return { next, sessionCookie, data: await next.json() }
+  }
+
+  it('drops a key left out of update(data) on the next request', async () => {
+    // The current cookie holds an `aud` key that the new data leaves out
+    const newSub = 'new-subject'
+    const cookie = await encrypt({ ...session.payload, aud: 'audience', iat: recent, sub })
+    const res = await app.request(`/session/data/${newSub}`, {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { next, sessionCookie, data } = await getNextSession(res)
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub: newSub })
+    expect(sessionCookie?.payload).toStrictEqual({ ...session.payload, iat: recent, sub: newSub })
+    expect(next.status).toBe(200)
+    expect(data).toStrictEqual({ sub: newSub })
+  })
+
+  it('drops a key removed by update(fn) on the next request', async () => {
+    // The update function removes the `aud` key held in the current cookie
+    const cookie = await encrypt({ ...session.payload, aud: 'audience', iat: recent, sub })
+    const res = await app.request('/session/fn', {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const { next, sessionCookie, data } = await getNextSession(res)
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub })
+    expect(sessionCookie?.payload).toStrictEqual({ ...session.payload, iat: recent, sub })
+    expect(next.status).toBe(200)
+    expect(data).toStrictEqual({ sub })
+  })
+
+  it('drops a key left out of the refreshed data on the next request', async () => {
+    // The expired cookie holds an `aud` key that the refreshed data leaves out
+    const newSub = 'new-subject'
+    refresh.mockResolvedValue({ sub: newSub })
+    const expiredSession = { ...session.payload, aud: 'audience', exp: recent, iat: recent, sub }
+    const cookie = await encrypt(expiredSession)
+    const res = await app.request('/session/refresh', { headers: { cookie: `sid=${cookie}` } })
+    const { next, sessionCookie, data } = await getNextSession(res)
+
+    expect(refresh).toHaveBeenCalledWith({ aud: 'audience', sub })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ sub: newSub })
+    expect(sessionCookie?.payload.aud).toBeUndefined()
+    expect(sessionCookie?.payload.sid).toStrictEqual(expiredSession.sid)
+    expect(sessionCookie?.payload.sub).toStrictEqual(newSub)
+    expect(next.status).toBe(200)
+    expect(data).toStrictEqual({ sub: newSub })
+  })
+})
+
 describe('session.get() with storage', () => {
   const app = new Hono().get('/session', testSessionStorage, useSession({ secret }), async (c) => {
     const session = await c.var.session.get()
