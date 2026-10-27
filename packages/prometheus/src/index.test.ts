@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -181,6 +181,52 @@ describe('Prometheus middleware', () => {
         http_requests_total{method="GET",route="/",status="200",ok="true"} 1
         "
       `)
+    })
+
+    it('sends the content type of the default registry', async () => {
+      // A registry created without arguments uses the Prometheus text format.
+      const app = new Hono()
+      const registry = new Registry()
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe(Registry.PROMETHEUS_CONTENT_TYPE)
+      expect(response.headers.get('Content-Type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+    })
+
+    it('sends the OpenMetrics content type for an OpenMetrics registry', async () => {
+      // The registry is switched to the OpenMetrics content type, so the body is
+      // OpenMetrics text and the header must say so instead of plain text.
+      const app = new Hono()
+      const registry = new Registry<OpenMetricsContentType>()
+      registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      const { printMetrics, registerMetrics } = prometheus({
+        registry,
+        metricOptions: {
+          requestDuration: {
+            disabled: true,
+          },
+        },
+      })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      expect(response.headers.get('Content-Type')).toBe(
+        'application/openmetrics-text; version=1.0.0; charset=utf-8'
+      )
+      expect(await response.text()).toContain('# EOF')
     })
   })
 })
