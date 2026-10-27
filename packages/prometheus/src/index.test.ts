@@ -182,5 +182,47 @@ describe('Prometheus middleware', () => {
         "
       `)
     })
+
+    it('sends the default registry content type on the /metrics endpoint', async () => {
+      // Uses a registry created without arguments, whose type is the Prometheus text format
+      const app = new Hono()
+      const registry = new Registry()
+
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.headers.get('Content-Type')).toBe(registry.contentType)
+      expect(response.headers.get('Content-Type')).toBe(Registry.PROMETHEUS_CONTENT_TYPE)
+    })
+
+    it('sends the OpenMetrics content type when the registry uses OpenMetrics', async () => {
+      // Uses a registry constructed with the OpenMetrics content type
+      const app = new Hono()
+      const registry = new Registry(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      const { printMetrics, registerMetrics } = prometheus({
+        registry,
+        metricOptions: {
+          requestDuration: {
+            disabled: true, // Disable duration metrics to make the test result more predictable
+          },
+        },
+      })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.headers.get('Content-Type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      expect(await response.text()).toBe(await registry.metrics())
+    })
   })
 })

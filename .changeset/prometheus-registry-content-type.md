@@ -1,0 +1,5 @@
+---
+'@hono/prometheus': patch
+---
+
+Send the registry's content type as the `Content-Type` of the `printMetrics` response, so OpenMetrics registries are labelled `application/openmetrics-text` and the default registry is labelled with the Prometheus text format version instead of plain `text/plain`.
