@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -181,6 +181,48 @@ describe('Prometheus middleware', () => {
         http_requests_total{method="GET",route="/",status="200",ok="true"} 1
         "
       `)
+    })
+
+    it('sends the content type of a default registry', async () => {
+      // Uses a Registry built with no arguments, whose type is the Prometheus text format
+      const app = new Hono()
+      const registry = new Registry()
+
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(registry.contentType)
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+    })
+
+    it('sends the content type of an OpenMetrics registry', async () => {
+      // Uses a Registry constructed with the OpenMetrics content type. prom-client's typings
+      // declare no constructor argument and the `registry` option takes a Prometheus-typed
+      // Registry, so the constructor is cast to accept the argument it takes at runtime.
+      const OpenMetricsRegistry = Registry as unknown as new (
+        contentType: OpenMetricsContentType
+      ) => Registry
+      const app = new Hono()
+      const registry = new OpenMetricsRegistry(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      expect(response.headers.get('content-type')).toBe(
+        'application/openmetrics-text; version=1.0.0; charset=utf-8'
+      )
+      expect(await response.text()).toContain('# EOF')
     })
   })
 })
