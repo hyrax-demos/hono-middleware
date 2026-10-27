@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -179,6 +179,57 @@ describe('Prometheus middleware', () => {
         "# HELP http_requests_total Total number of HTTP requests
         # TYPE http_requests_total counter
         http_requests_total{method="GET",route="/",status="200",ok="true"} 1
+        "
+      `)
+    })
+
+    it('sends the content type of the default registry', async () => {
+      // Uses a registry built with no content type argument, so prom-client's
+      // Prometheus text format type applies.
+      const app = new Hono()
+      const registry = new Registry()
+
+      app.get('/metrics', prometheus({ registry }).printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+      expect(response.headers.get('content-type')).toBe(registry.contentType)
+    })
+
+    it('sends the OpenMetrics content type for an OpenMetrics registry', async () => {
+      // Uses a registry switched to the OpenMetrics content type, so the body is
+      // OpenMetrics text and the header must say so. setContentType() is used
+      // because prom-client's typings do not declare the constructor argument.
+      const app = new Hono()
+      const registry = new Registry<OpenMetricsContentType>()
+      registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE)
+
+      const { printMetrics, registerMetrics } = prometheus({
+        registry,
+        metricOptions: {
+          requestDuration: {
+            disabled: true,
+          },
+        },
+      })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
+      expect(await response.text()).toMatchInlineSnapshot(`
+        "# HELP http_requests Total number of HTTP requests
+        # TYPE http_requests counter
+        http_requests_total{method="GET",route="/",status="200",ok="true"} 1
+        # EOF
         "
       `)
     })
