@@ -219,10 +219,13 @@ describe('Prometheus middleware', () => {
 
       await app.request('http://localhost/')
 
+      // Read before requesting /metrics: registerMetrics counts that request only after the body is rendered
+      const expected = await registry.metrics()
+
       const response = await app.request('http://localhost/metrics')
 
       expect(response.headers.get('Content-Type')).toBe(Registry.OPENMETRICS_CONTENT_TYPE)
-      expect(await response.text()).toBe(await registry.metrics())
+      expect(await response.text()).toBe(expected)
     })
   })
 })
