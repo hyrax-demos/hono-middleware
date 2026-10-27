@@ -7,7 +7,7 @@ import { createStandardMetrics } from './standardMetrics'
 import type { MetricOptions, CustomMetricsOptions } from './standardMetrics'
 
 interface PrometheusOptions {
-  registry?: Registry
+  registry?: Registry<RegistryContentType>
   collectDefaultMetrics?: boolean | DefaultMetricsCollectorConfiguration<RegistryContentType>
   prefix?: string
   metricOptions?: Omit<CustomMetricsOptions, 'prefix' | 'register'>
@@ -53,7 +53,13 @@ export const prometheus = (
   })
 
   return {
-    printMetrics: async (c: Context) => c.text(await registry.metrics()),
+    printMetrics: async (c: Context) => {
+      const res = c.text(await registry.metrics())
+      // Set on the returned response: hono 3's c.text() ignores a headers
+      // argument unless a numeric status is also passed.
+      res.headers.set('Content-Type', registry.contentType)
+      return res
+    },
     registerMetrics: createMiddleware(async (c, next) => {
       const timer = metrics.requestDuration?.startTimer()
 
