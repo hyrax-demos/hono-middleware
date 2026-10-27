@@ -182,5 +182,40 @@ describe('Prometheus middleware', () => {
         "
       `)
     })
+
+    it('sends the content type of the default registry', async () => {
+      // No registry option: the middleware creates its own Prometheus-format registry.
+      const app = new Hono()
+      const { printMetrics } = prometheus()
+
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+    })
+
+    it('sends the content type of an OpenMetrics registry', async () => {
+      // A registry created with the OpenMetrics content type must not be labelled as plain text.
+      const app = new Hono()
+      // @ts-expect-error prom-client's typings omit the constructor's content type parameter
+      const registry = new Registry(Registry.OPENMETRICS_CONTENT_TYPE)
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(
+        'application/openmetrics-text; version=1.0.0; charset=utf-8'
+      )
+      expect(await response.text()).toContain('# EOF')
+    })
   })
 })
