@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import type { Histogram } from 'prom-client'
+import type { Histogram, OpenMetricsContentType } from 'prom-client'
 import { Registry } from 'prom-client'
 import { prometheus } from './index'
 
@@ -200,9 +200,10 @@ describe('Prometheus middleware', () => {
     })
 
     it('sends the OpenMetrics content type when the registry uses OpenMetrics', async () => {
-      // Uses a registry constructed with the OpenMetrics content type
+      // Uses a registry switched to the OpenMetrics content type; prom-client's typings declare no constructor arguments
       const app = new Hono()
-      const registry = new Registry(Registry.OPENMETRICS_CONTENT_TYPE)
+      const registry = new Registry<OpenMetricsContentType>()
+      registry.setContentType(Registry.OPENMETRICS_CONTENT_TYPE)
 
       const { printMetrics, registerMetrics } = prometheus({
         registry,

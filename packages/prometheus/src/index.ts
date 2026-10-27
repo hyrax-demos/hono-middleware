@@ -7,7 +7,7 @@ import { createStandardMetrics } from './standardMetrics'
 import type { MetricOptions, CustomMetricsOptions } from './standardMetrics'
 
 interface PrometheusOptions {
-  registry?: Registry
+  registry?: Registry<RegistryContentType>
   collectDefaultMetrics?: boolean | DefaultMetricsCollectorConfiguration<RegistryContentType>
   prefix?: string
   metricOptions?: Omit<CustomMetricsOptions, 'prefix' | 'register'>
