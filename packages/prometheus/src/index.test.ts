@@ -182,5 +182,42 @@ describe('Prometheus middleware', () => {
         "
       `)
     })
+
+    it('sends the default registry content type on the /metrics endpoint', async () => {
+      // No registry option, so printMetrics serves the Registry created with prom-client's default type
+      const app = new Hono()
+
+      const { printMetrics } = prometheus()
+
+      app.get('/metrics', printMetrics)
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8')
+    })
+
+    it('sends the OpenMetrics content type when the registry uses OpenMetrics', async () => {
+      // Input: a registry constructed with the OpenMetrics content type, whose output must not be labelled text/plain
+      const app = new Hono()
+      // prom-client's typings declare no constructor argument, but the runtime constructor takes the content type
+      const registry = Reflect.construct(Registry, [Registry.OPENMETRICS_CONTENT_TYPE]) as Registry
+
+      const { printMetrics, registerMetrics } = prometheus({ registry })
+
+      app.use('*', registerMetrics)
+      app.get('/', (c) => c.text('hello'))
+      app.get('/metrics', printMetrics)
+
+      await app.request('http://localhost/')
+
+      const response = await app.request('http://localhost/metrics')
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toBe(
+        'application/openmetrics-text; version=1.0.0; charset=utf-8'
+      )
+      expect(await response.text()).toMatch(/# EOF\n$/)
+    })
   })
 })
