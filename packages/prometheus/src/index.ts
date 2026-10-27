@@ -7,7 +7,7 @@ import { createStandardMetrics } from './standardMetrics'
 import type { MetricOptions, CustomMetricsOptions } from './standardMetrics'
 
 interface PrometheusOptions {
-  registry?: Registry
+  registry?: Registry<RegistryContentType>
   collectDefaultMetrics?: boolean | DefaultMetricsCollectorConfiguration<RegistryContentType>
   prefix?: string
   metricOptions?: Omit<CustomMetricsOptions, 'prefix' | 'register'>
@@ -53,7 +53,12 @@ export const prometheus = (
   })
 
   return {
-    printMetrics: async (c: Context) => c.text(await registry.metrics()),
+    printMetrics: async (c: Context) => {
+      const res = c.text(await registry.metrics())
+      // Label the body with the registry's exposition format instead of c.text's text/plain default
+      res.headers.set('Content-Type', registry.contentType)
+      return res
+    },
     registerMetrics: createMiddleware(async (c, next) => {
       const timer = metrics.requestDuration?.startTimer()
 
