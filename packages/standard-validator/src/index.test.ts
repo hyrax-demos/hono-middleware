@@ -553,6 +553,27 @@ describe('Standard Schema Validation', () => {
           expect(body.data['x-other']).toBe('bar')
           expect(JSON.stringify(body)).not.toContain('SECRET=123')
         })
+
+        it('does not echo the cookie when a union schema validates the cookie header', async () => {
+          // Cookie value 'SECRET=123' matches neither 'a' nor 'b'; valibot then nests
+          // per-option sub-issues, without a path, under the union issue.
+          const cookieSchemas: Record<typeof lib, StandardSchemaV1> = {
+            valibot: v.object({ cookie: v.union([v.literal('a'), v.literal('b')]) }),
+            zod: z.object({ cookie: z.union([z.literal('a'), z.literal('b')]) }),
+            arktype: type({ cookie: "'a' | 'b'" }),
+          }
+          const app = new Hono()
+
+          app.get('/headers', sValidator('header', cookieSchemas[lib]), (c) =>
+            c.json({ success: true })
+          )
+
+          const res = await app.request(cookieRequest())
+          expect(res.status).toBe(400)
+          const body = (await res.json()) as { data: Record<string, string> }
+          expect(body.data['x-other']).toBe('bar')
+          expect(JSON.stringify(body)).not.toContain('SECRET=123')
+        })
       })
     })
   })

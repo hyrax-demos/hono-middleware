@@ -60,41 +60,60 @@ const redact = (text: unknown, secrets: string[]): unknown =>
     ? secrets.reduce((acc, secret) => acc.split(secret).join(REDACTED), text)
     : text
 
-const sanitizeIssue = (issue: unknown, fields: string[]): unknown => {
+/**
+ * `inheritedSecrets` is set when a parent issue's path reaches a restricted field:
+ * valibot's nested sub-issues (e.g. from `union`) carry no path of their own.
+ */
+const sanitizeIssue = (
+  issue: unknown,
+  fields: string[],
+  inheritedSecrets?: readonly string[]
+): unknown => {
   if (!isPlainObject(issue)) {
     return issue
   }
 
-  const secrets: string[] = []
-  let restrictedPath = false
-  const path = Array.isArray(issue.path)
-    ? issue.path.map((item: unknown) => {
+  const secrets: string[] = [...(inheritedSecrets ?? [])]
+  let restrictedPath = inheritedSecrets !== undefined
+  const rawPath = issue['path']
+  const path = Array.isArray(rawPath)
+    ? rawPath.map((item: unknown) => {
         if (!isPlainObject(item)) {
           return item
         }
-        if (isPlainObject(item.input)) {
+        const itemInput = item['input']
+        if (isPlainObject(itemInput)) {
           for (const field of fields) {
-            const secret = item.input[field]
+            const secret = itemInput[field]
             if (typeof secret === 'string' && secret !== '') {
               secrets.push(secret)
             }
           }
         }
-        const copy: Record<string, unknown> = { ...item, input: omitFields(item.input, fields) }
-        if (typeof item.key === 'string' && fields.includes(item.key)) {
+        const copy: Record<string, unknown> = { ...item, input: omitFields(itemInput, fields) }
+        const itemKey = item['key']
+        if (typeof itemKey === 'string' && fields.includes(itemKey)) {
           restrictedPath = true
           return Object.fromEntries(Object.entries(copy).filter(([key]) => key !== 'value'))
         }
         return copy
       })
-    : issue.path
+    : rawPath
 
+  const input = issue['input']
+  if (restrictedPath && typeof input === 'string' && input !== '') {
+    secrets.push(input)
+  }
+
+  const subIssues = issue['issues']
   const sanitized: Record<string, unknown> = {
     ...issue,
-    input: omitFields(issue.input, fields),
+    input: omitFields(input, fields),
     ...(path !== undefined && { path }),
-    ...(Array.isArray(issue.issues) && {
-      issues: issue.issues.map((subIssue: unknown) => sanitizeIssue(subIssue, fields)),
+    ...(Array.isArray(subIssues) && {
+      issues: subIssues.map((subIssue: unknown) =>
+        sanitizeIssue(subIssue, fields, restrictedPath ? secrets : undefined)
+      ),
     }),
   }
 
@@ -121,13 +140,14 @@ const sanitizeResult = <T>(result: T, target: keyof ValidationTargets): T => {
   }
   const fields = RESTRICTED_DATA_FIELDS[target as keyof typeof RESTRICTED_DATA_FIELDS]
 
+  const issues = result['issues']
   return {
-    typed: result.typed,
-    success: result.success,
-    output: omitFields(result.output, fields),
-    issues: Array.isArray(result.issues)
-      ? result.issues.map((issue: unknown) => sanitizeIssue(issue, fields))
-      : result.issues,
+    typed: result['typed'],
+    success: result['success'],
+    output: omitFields(result['output'], fields),
+    issues: Array.isArray(issues)
+      ? issues.map((issue: unknown) => sanitizeIssue(issue, fields))
+      : issues,
   } as T
 }
 

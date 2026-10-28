@@ -94,6 +94,47 @@ function pathItemKey(item: unknown): unknown {
   return isRecord(item) ? item['key'] : item
 }
 
+function redactWith(text: string, rawValues: ReadonlySet<string>): string {
+  let result = text
+  for (const rawValue of rawValues) {
+    if (rawValue !== '') {
+      result = result.split(rawValue).join(REDACTED)
+    }
+  }
+  return result
+}
+
+/**
+ * Redacts the nested `issues` of an issue whose path reaches a restricted field:
+ * each sub-issue is copied without `input`, and `rawValues` (plus the sub-issue's
+ * own string `input`) are redacted in its string fields, recursively.
+ */
+function redactSubIssues(subIssues: readonly unknown[], rawValues: ReadonlySet<string>): unknown[] {
+  return subIssues.map((subIssue) => {
+    if (!isRecord(subIssue)) {
+      return subIssue
+    }
+    const values = new Set(rawValues)
+    const input = subIssue['input']
+    if (typeof input === 'string') {
+      values.add(input)
+    }
+    return Object.fromEntries(
+      Object.entries(subIssue)
+        .filter(([field]) => field !== 'input')
+        .map(([field, value]) => {
+          if (field === 'issues' && Array.isArray(value)) {
+            return [field, redactSubIssues(value, values)]
+          }
+          if (REDACTED_STRING_FIELDS.includes(field) && typeof value === 'string') {
+            return [field, redactWith(value, values)]
+          }
+          return [field, value]
+        })
+    )
+  })
+}
+
 /**
  * Redacts the raw value of issues whose path points at a restricted field
  * (e.g. a schema that validates the `cookie` header itself). Such issues can
@@ -178,15 +219,7 @@ function redactRestrictedPathIssues(
       setOwn('input', omitKeys(raw['input'], ['data', 'actual', 'problem', 'message']))
     }
 
-    const redactString = (text: string): string => {
-      let result = text
-      for (const rawValue of rawValues) {
-        if (rawValue !== '') {
-          result = result.split(rawValue).join(REDACTED)
-        }
-      }
-      return result
-    }
+    const redactString = (text: string): string => redactWith(text, rawValues)
 
     for (const field of REDACTED_STRING_FIELDS) {
       const text = redacted[field]
@@ -196,6 +229,12 @@ function redactRestrictedPathIssues(
           setOwn(field, replaced)
         }
       }
+    }
+
+    // valibot's nested sub-issues (e.g. from `union`) have no path of their own
+    // but carry the same raw value in `input` and in their string fields.
+    if (Array.isArray(raw['issues'])) {
+      setOwn('issues', redactSubIssues(raw['issues'], rawValues))
     }
 
     return redacted as unknown as StandardSchemaV1.Issue

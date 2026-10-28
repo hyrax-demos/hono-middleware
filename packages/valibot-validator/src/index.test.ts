@@ -559,6 +559,11 @@ describe('Header validation - sensitive data', () => {
     (c) => c.json(c.req.valid('header'))
   )
   app.get(
+    '/cookie-union',
+    vValidator('header', v.object({ cookie: v.union([v.literal('a'), v.literal('b')]) })),
+    (c) => c.json(c.req.valid('header'))
+  )
+  app.get(
     '/hook',
     vValidator('header', v.object({ 'user-agent': v.string() }), (result, c) => {
       if (!result.success) {
@@ -601,6 +606,17 @@ describe('Header validation - sensitive data', () => {
     const body = (await res.json()) as { success: boolean; issues: unknown[] }
     expect(body.success).toBe(false)
     expect(body.issues.length).toBeGreaterThan(0)
+    expect(JSON.stringify(body)).not.toContain('SECRET=123')
+  })
+
+  it('Should not echo the cookie value in sub-issues of a union on the cookie key', async () => {
+    // The cookie 'SECRET=123' matches neither literal, so the union issue carries
+    // nested per-option issues that have no path of their own.
+    const res = await request('/cookie-union')
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { success: boolean; issues: { issues?: unknown[] }[] }
+    expect(body.success).toBe(false)
+    expect(body.issues[0]?.issues?.length).toBeGreaterThan(0)
     expect(JSON.stringify(body)).not.toContain('SECRET=123')
   })
 
