@@ -656,6 +656,7 @@ export class StreamableHTTPTransport implements Transport {
 
     // Clear any pending responses
     this.#requestResponseMap.clear()
+    this.#requestToStreamMapping.clear()
     this.onclose?.()
   }
 
@@ -724,11 +725,26 @@ export class StreamableHTTPTransport implements Transport {
     }
 
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
-      this.#requestResponseMap.set(requestId, message)
       const relatedIds = Array.from(this.#requestToStreamMapping.entries())
-        .filter(([, streamId]) => this.#streamMapping.get(streamId) === response)
+        .filter(([, sid]) => sid === streamId)
         .map(([id]) => id)
-      isJSONRPCResultResponse
+
+      if (!response) {
+        // The client disconnected (the stream aborted), so there is nowhere to
+        // deliver the result. If an eventStore is configured, the result is
+        // already stored for Last-Event-ID replay. Dropping it here keeps it
+        // from being retained until close().
+        this.#requestToStreamMapping.delete(requestId)
+        for (const id of relatedIds) {
+          if (id !== requestId && this.#requestResponseMap.has(id)) {
+            this.#requestResponseMap.delete(id)
+            this.#requestToStreamMapping.delete(id)
+          }
+        }
+        return
+      }
+
+      this.#requestResponseMap.set(requestId, message)
       // Check if we have responses for all requests using this connection
       const allResponsesReady = relatedIds.every((id) => this.#requestResponseMap.has(id))
 
@@ -745,7 +761,9 @@ export class StreamableHTTPTransport implements Transport {
           const responses = relatedIds.map((id) => this.#requestResponseMap.get(id)!)
 
           response.ctx.json?.(responses.length === 1 ? responses[0] : responses)
-          return
+          // The HTTP response is resolved, so this stream entry has no further use.
+          // The per-request entries are removed by the loop below.
+          this.#streamMapping.get(streamId)?.cleanup()
         } else {
           response.stream?.abort()
         }
