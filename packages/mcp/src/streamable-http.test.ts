@@ -1108,7 +1108,7 @@ describe('MCP helper', () => {
       })
 
       expect(response.status).toBe(400)
-      const errorData = await response.json()
+      const errorData: unknown = await response.json()
       expectErrorResponse(
         errorData,
         -32000,
@@ -1135,7 +1135,7 @@ describe('MCP helper', () => {
       })
 
       expect(response.status).toBe(400)
-      const errorData = await response.json()
+      const errorData: unknown = await response.json()
       expectErrorResponse(
         errorData,
         -32000,
@@ -1164,7 +1164,7 @@ describe('MCP helper', () => {
       })
 
       expect(response.status).toBe(400)
-      const errorData = await response.json()
+      const errorData: unknown = await response.json()
       expectErrorResponse(
         errorData,
         -32000,
@@ -2522,11 +2522,13 @@ async function createTestServerWithOnError(config: {
     { capabilities: { logging: {} } }
   )
 
-  mcpServer.tool(
+  mcpServer.registerTool(
     'greet',
-    'A simple greeting tool',
-    { name: z.string().describe('Name to greet') },
-    async ({ name }): Promise<CallToolResult> => {
+    {
+      description: 'A simple greeting tool',
+      inputSchema: { name: z.string().describe('Name to greet') },
+    },
+    ({ name }): CallToolResult => {
       return { content: [{ type: 'text', text: `Hello, ${name}!` }] }
     }
   )
@@ -2781,7 +2783,7 @@ describe('host app.onError does not override transport refusals', () => {
     })
 
     expect(response.status).toBe(403)
-    const body = await response.json()
+    const body: unknown = await response.json()
     expectErrorResponse(body, -32000, /Invalid Host header:/)
   })
 })
