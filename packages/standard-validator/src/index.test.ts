@@ -574,6 +574,36 @@ describe('Standard Schema Validation', () => {
           expect(body.data['x-other']).toBe('bar')
           expect(JSON.stringify(body)).not.toContain('SECRET=123')
         })
+
+        it('does not echo the cookie when the schema root is a union', async () => {
+          // The root union itself has no path; the option that checks `cookie` against
+          // 'a' fails on the request's 'SECRET=123' cookie and the other option fails
+          // on the missing user-agent header. valibot nests both option issues under
+          // `issues` and arktype under `errors`, each with its own path, beneath the
+          // path-less union issue; arktype also quotes the cookie in its message.
+          const cookieSchemas: Record<typeof lib, StandardSchemaV1> = {
+            valibot: v.union([
+              v.object({ cookie: v.literal('a') }),
+              v.object({ 'user-agent': v.string() }),
+            ]),
+            zod: z.union([
+              z.object({ cookie: z.literal('a') }),
+              z.object({ 'user-agent': z.string() }),
+            ]),
+            arktype: type({ cookie: "'a'" }).or({ 'user-agent': 'string' }),
+          }
+          const app = new Hono()
+
+          app.get('/headers', sValidator('header', cookieSchemas[lib]), (c) =>
+            c.json({ success: true })
+          )
+
+          const res = await app.request(cookieRequest())
+          expect(res.status).toBe(400)
+          const body = (await res.json()) as { data: Record<string, string> }
+          expect(body.data['x-other']).toBe('bar')
+          expect(JSON.stringify(body)).not.toContain('SECRET=123')
+        })
       })
     })
   })

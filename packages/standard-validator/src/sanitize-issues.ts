@@ -36,17 +36,19 @@ export function sanitizeIssues(
   const restrictedFields =
     RESTRICTED_DATA_FIELDS[target as keyof typeof RESTRICTED_DATA_FIELDS] || []
 
-  let sanitized = issues
+  // Redact first: it reads the restricted raw values from the issues' `data`,
+  // which sanitizeArktypeIssues strips.
+  let sanitized = redactRestrictedPathIssues(issues, vendor, restrictedFields)
 
   if (vendor === 'arktype') {
-    sanitized = sanitizeArktypeIssues(issues, restrictedFields)
+    sanitized = sanitizeArktypeIssues(sanitized, restrictedFields)
   }
 
   if (vendor === 'valibot') {
-    sanitized = sanitizeValibotIssues(issues, restrictedFields)
+    sanitized = sanitizeValibotIssues(sanitized, restrictedFields)
   }
 
-  return redactRestrictedPathIssues(sanitized, vendor, restrictedFields)
+  return sanitized
 }
 
 /**
@@ -152,13 +154,12 @@ function redactRestrictedPathIssues(
     return typeof key === 'string' && restrictedFields.includes(key)
   }
 
-  if (!issues.some(reachesRestricted)) {
-    return issues
-  }
-
-  const redactIssue = (issue: StandardSchemaV1.Issue): StandardSchemaV1.Issue => {
+  const redactIssue = (
+    issue: StandardSchemaV1.Issue,
+    inheritedValues: ReadonlySet<string>
+  ): StandardSchemaV1.Issue => {
     const raw = issue as unknown as Record<string, unknown>
-    const rawValues = new Set<string>()
+    const rawValues = new Set<string>(inheritedValues)
 
     // arktype's own `input` is its error context, not the validated value.
     const dropInput = vendor !== 'arktype'
@@ -214,9 +215,21 @@ function redactRestrictedPathIssues(
     if (vendor === 'arktype' && typeof raw['data'] === 'string') {
       setOwn('data', REDACTED)
     }
+    // arktype's union errors nest one error per branch in `errors`, each with
+    // its own path (here also reaching the restricted field).
+    const arktypeErrors =
+      vendor === 'arktype' && Array.isArray(raw['errors'])
+        ? Array.from(raw['errors'] as StandardSchemaV1.Issue[], (error) =>
+            sanitizeIssue(error, rawValues)
+          )
+        : undefined
+    if (arktypeErrors) {
+      setOwn('errors', arktypeErrors)
+    }
     // arktype spreads its error context into toJSON; drop raw-value fields from it.
     if (vendor === 'arktype' && isRecord(raw['input'])) {
-      setOwn('input', omitKeys(raw['input'], ['data', 'actual', 'problem', 'message']))
+      const context = omitKeys(raw['input'], ['data', 'actual', 'problem', 'message'])
+      setOwn('input', arktypeErrors ? { ...context, errors: arktypeErrors } : context)
     }
 
     const redactString = (text: string): string => redactWith(text, rawValues)
@@ -240,7 +253,119 @@ function redactRestrictedPathIssues(
     return redacted as unknown as StandardSchemaV1.Issue
   }
 
-  return Array.from(issues, (issue) => (reachesRestricted(issue) ? redactIssue(issue) : issue))
+  const hasRestrictedKey = (value: unknown): boolean =>
+    isRecord(value) && restrictedFields.some((field) => field in value)
+
+  /**
+   * Issues whose own path does not reach a restricted field can still hold it:
+   * e.g. a `union` at the schema root has no path, its `input` (valibot) or
+   * `data` (arktype) is the whole header record, and its nested `issues`
+   * (valibot) or `errors` (arktype), one per option, carry their own paths,
+   * some of which reach the `cookie` header. Such an issue is copied with the
+   * restricted keys dropped from its object `input`/`data` and from path items'
+   * `input`, the raw restricted values redacted from its string fields, and its
+   * nested `issues`/`errors` sanitized the same way.
+   */
+  const sanitizeIssue = (
+    issue: StandardSchemaV1.Issue,
+    inheritedValues: ReadonlySet<string> = new Set()
+  ): StandardSchemaV1.Issue => {
+    if (reachesRestricted(issue)) {
+      return redactIssue(issue, inheritedValues)
+    }
+    if (!isRecord(issue)) {
+      return issue
+    }
+
+    const raw = issue as unknown as Record<string, unknown>
+    // arktype's own `input` is its error context, not the validated value;
+    // arktype keeps the validated value in `data`.
+    const validated = vendor === 'arktype' ? raw['data'] : raw['input']
+    const rawValues = new Set<string>(inheritedValues)
+    if (isRecord(validated)) {
+      for (const field of restrictedFields) {
+        const value = validated[field]
+        if (typeof value === 'string') {
+          rawValues.add(value)
+        }
+      }
+    }
+    const stripValidated = hasRestrictedKey(validated)
+    const stripPath =
+      Array.isArray(issue.path) &&
+      issue.path.some((item) => isRecord(item) && hasRestrictedKey(item['input']))
+    const nestedField = vendor === 'arktype' ? 'errors' : 'issues'
+    const subIssues = raw[nestedField]
+    const sanitizedSubIssues = Array.isArray(subIssues)
+      ? Array.from(subIssues as StandardSchemaV1.Issue[], (subIssue) =>
+          sanitizeIssue(subIssue, rawValues)
+        )
+      : undefined
+    const subIssuesChanged =
+      sanitizedSubIssues !== undefined &&
+      sanitizedSubIssues.some((subIssue, index) => subIssue !== (subIssues as unknown[])[index])
+
+    if (rawValues.size === 0 && !stripValidated && !stripPath && !subIssuesChanged) {
+      return issue
+    }
+
+    const proto = Object.getPrototypeOf(issue) as object | null
+    const copy = Object.create(proto) as Record<string, unknown>
+    const setOwn = (field: string, value: unknown) => {
+      Object.defineProperty(copy, field, {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+    for (const [field, value] of Object.entries(raw)) {
+      setOwn(field, value)
+    }
+    if (stripValidated) {
+      setOwn(
+        vendor === 'arktype' ? 'data' : 'input',
+        omitKeys(validated as Record<string, unknown>, restrictedFields)
+      )
+    }
+    if (stripPath) {
+      setOwn(
+        'path',
+        Array.from(issue.path ?? [], (item) =>
+          isRecord(item) && isRecord(item['input'])
+            ? { ...item, input: omitKeys(item['input'], restrictedFields) }
+            : item
+        )
+      )
+    }
+    if (subIssuesChanged) {
+      setOwn(nestedField, sanitizedSubIssues)
+    }
+    // arktype spreads its error context into toJSON; keep its `errors` in step
+    // and drop raw-value fields from it.
+    if (vendor === 'arktype' && isRecord(raw['input'])) {
+      const context = omitKeys(raw['input'], ['data', 'actual', 'problem', 'message'])
+      setOwn(
+        'input',
+        sanitizedSubIssues && 'errors' in context
+          ? { ...context, errors: sanitizedSubIssues }
+          : context
+      )
+    }
+    // Read after the copy is built: arktype computes these fields with getters.
+    for (const field of REDACTED_STRING_FIELDS) {
+      const text = copy[field]
+      if (typeof text === 'string') {
+        const replaced = redactWith(text, rawValues)
+        if (replaced !== text) {
+          setOwn(field, replaced)
+        }
+      }
+    }
+    return copy as unknown as StandardSchemaV1.Issue
+  }
+
+  return Array.from(issues, (issue) => sanitizeIssue(issue))
 }
 
 function sanitizeArktypeIssues(
