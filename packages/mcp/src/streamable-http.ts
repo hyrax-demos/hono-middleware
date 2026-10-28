@@ -137,16 +137,17 @@ export class StreamableHTTPTransport implements Transport {
     // Validate request headers for DNS rebinding protection
     const validationError = this.#validateRequestHeaders(ctx)
     if (validationError) {
-      throw new HTTPException(403, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: -32000,
             message: validationError,
           },
           id: null,
-        }),
-      })
+        },
+        { status: 403 }
+      )
     }
 
     switch (ctx.req.method) {
@@ -169,23 +170,30 @@ export class StreamableHTTPTransport implements Transport {
       // The client MUST include an Accept header, listing text/event-stream as a supported content type.
       const getAcceptHeader = ctx.req.header('Accept') ?? '*/*'
       if (!getAcceptHeader.includes('text/event-stream') && !getAcceptHeader.includes('*/*')) {
-        throw new HTTPException(406, {
-          res: Response.json({
+        return Response.json(
+          {
             jsonrpc: '2.0',
             error: {
               code: -32000,
               message: 'Not Acceptable: Client must accept text/event-stream',
             },
             id: null,
-          }),
-        })
+          },
+          { status: 406 }
+        )
       }
 
       // If an Mcp-Session-Id is returned by the server during initialization,
       // clients using the Streamable HTTP transport MUST include it
       // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
-      this.#validateSession(ctx)
-      this.#validateProtocolVersion(ctx)
+      const sessionRefusal = this.#validateSession(ctx)
+      if (sessionRefusal) {
+        return sessionRefusal
+      }
+      const versionRefusal = this.#validateProtocolVersion(ctx)
+      if (versionRefusal) {
+        return versionRefusal
+      }
 
       // After initialization, always include the session ID if we have one
       if (this.sessionId !== undefined) {
@@ -211,6 +219,7 @@ export class StreamableHTTPTransport implements Transport {
                   })
                 } catch {
                   this.onerror?.(new Error('Failed replay events'))
+                  // Runs inside the SSE stream, so this cannot be returned as a Response.
                   throw new HTTPException(500, {
                     message: 'Failed replay events',
                   })
@@ -223,16 +232,17 @@ export class StreamableHTTPTransport implements Transport {
       // Check if there's already an active standalone SSE stream for this session
       if (typeof streamId === 'string' && this.#streamMapping.get(streamId) !== undefined) {
         // Only one GET SSE stream is allowed per session
-        throw new HTTPException(409, {
-          res: Response.json({
+        return Response.json(
+          {
             jsonrpc: '2.0',
             error: {
               code: -32000,
               message: 'Conflict: Only one SSE stream is allowed per session',
             },
             id: null,
-          }),
-        })
+          },
+          { status: 409 }
+        )
       }
 
       return streamSSE(ctx, async (stream) => {
@@ -289,8 +299,8 @@ export class StreamableHTTPTransport implements Transport {
       this.onerror?.(error as Error)
 
       // return JSON-RPC formatted error
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ParseError,
@@ -298,8 +308,9 @@ export class StreamableHTTPTransport implements Transport {
             data: String(error),
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
   }
 
@@ -318,8 +329,8 @@ export class StreamableHTTPTransport implements Transport {
           acceptHeader.includes('*/*')
 
       if (!isAcceptable) {
-        throw new HTTPException(406, {
-          res: Response.json({
+        return Response.json(
+          {
             jsonrpc: '2.0',
             error: {
               code: ErrorCode.ConnectionClosed,
@@ -328,22 +339,24 @@ export class StreamableHTTPTransport implements Transport {
                 : 'Not Acceptable: Client must accept application/json or text/event-stream',
             },
             id: null,
-          }),
-        })
+          },
+          { status: 406 }
+        )
       }
 
       const ct = ctx.req.header('Content-Type')
       if (!ct?.includes('application/json')) {
-        throw new HTTPException(415, {
-          res: Response.json({
+        return Response.json(
+          {
             jsonrpc: '2.0',
             error: {
               code: ErrorCode.ConnectionClosed,
               message: 'Unsupported Media Type: Content-Type must be application/json',
             },
             id: null,
-          }),
-        })
+          },
+          { status: 415 }
+        )
       }
 
       const authInfo: AuthInfo | undefined = ctx.get('auth')
@@ -370,29 +383,31 @@ export class StreamableHTTPTransport implements Transport {
         // If it's a server with session management and the session ID is already set we should reject the request
         // to avoid re-initialization.
         if (this.#initialized && this.sessionId !== undefined) {
-          throw new HTTPException(400, {
-            res: Response.json({
+          return Response.json(
+            {
               jsonrpc: '2.0',
               error: {
                 code: ErrorCode.InvalidRequest,
                 message: 'Invalid Request: Server already initialized',
               },
               id: null,
-            }),
-          })
+            },
+            { status: 400 }
+          )
         }
 
         if (messages.length > 1) {
-          throw new HTTPException(400, {
-            res: Response.json({
+          return Response.json(
+            {
               jsonrpc: '2.0',
               error: {
                 code: ErrorCode.InvalidRequest,
                 message: 'Invalid Request: Only one initialization request is allowed',
               },
               id: null,
-            }),
-          })
+            },
+            { status: 400 }
+          )
         }
         this.sessionId = this.#sessionIdGenerator?.()
         this.#initialized = true
@@ -408,9 +423,15 @@ export class StreamableHTTPTransport implements Transport {
         // If an Mcp-Session-Id is returned by the server during initialization,
         // clients using the Streamable HTTP transport MUST include it
         // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
-        this.#validateSession(ctx)
+        const sessionRefusal = this.#validateSession(ctx)
+        if (sessionRefusal) {
+          return sessionRefusal
+        }
         // Mcp-Protocol-Version header is required for all requests after initialization.
-        this.#validateProtocolVersion(ctx)
+        const versionRefusal = this.#validateProtocolVersion(ctx)
+        if (versionRefusal) {
+          return versionRefusal
+        }
       }
 
       // check if it contains requests
@@ -502,8 +523,8 @@ export class StreamableHTTPTransport implements Transport {
       this.onerror?.(error as Error)
 
       // return JSON-RPC formatted error
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ParseError,
@@ -511,8 +532,9 @@ export class StreamableHTTPTransport implements Transport {
             data: String(error),
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
   }
 
@@ -520,8 +542,14 @@ export class StreamableHTTPTransport implements Transport {
    * Handles DELETE requests to terminate sessions
    */
   private async handleDeleteRequest(ctx: Context) {
-    this.#validateSession(ctx)
-    this.#validateProtocolVersion(ctx)
+    const sessionRefusal = this.#validateSession(ctx)
+    if (sessionRefusal) {
+      return sessionRefusal
+    }
+    const versionRefusal = this.#validateProtocolVersion(ctx)
+    if (versionRefusal) {
+      return versionRefusal
+    }
 
     if (this.#onSessionClosed && this.sessionId) {
       await Promise.resolve(this.#onSessionClosed(this.sessionId))
@@ -555,94 +583,103 @@ export class StreamableHTTPTransport implements Transport {
 
   /**
    * Validates session ID for non-initialization requests
-   * Returns true if the session is valid, false otherwise
+   * @returns A refusal response if validation fails, undefined if it passes.
    */
-  #validateSession(ctx: Context): boolean {
+  #validateSession(ctx: Context): Response | undefined {
     if (this.#sessionIdGenerator === undefined) {
       // If the sessionIdGenerator ID is not set, the session management is disabled
       // and we don't need to validate the session ID
-      return true
+      return undefined
     }
     if (!this.#initialized) {
       // If the server has not been initialized yet, reject all requests
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ConnectionClosed,
             message: 'Bad Request: Server not initialized',
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
 
     const sessionId = ctx.req.header('mcp-session-id')
 
     if (!sessionId) {
       // Non-initialization requests without a session ID should return 400 Bad Request
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ConnectionClosed,
             message: 'Bad Request: Mcp-Session-Id header is required',
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
 
     if (sessionId === this.sessionId) {
-      return true
+      return undefined
     }
 
     // Headers.get joins repeated fields as "a, b". A non-matching value with a
     // comma is a malformed request, not an unknown session, so answer 400.
     if (sessionId.includes(',')) {
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ConnectionClosed,
             message: 'Bad Request: Mcp-Session-Id header must be a single value',
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
 
     // Reject requests with invalid session ID with 404 Not Found
-    throw new HTTPException(404, {
-      res: Response.json({
+    return Response.json(
+      {
         jsonrpc: '2.0',
         error: {
           code: ErrorCode.RequestTimeout,
           message: 'Session not found',
         },
         id: null,
-      }),
-    })
+      },
+      { status: 404 }
+    )
   }
 
-  #validateProtocolVersion(ctx: Context): boolean {
+  /**
+   * Validates the Mcp-Protocol-Version header
+   * @returns A refusal response if validation fails, undefined if it passes.
+   */
+  #validateProtocolVersion(ctx: Context): Response | undefined {
     // Headers.get joins repeated fields as "a, b", so a repeated header is rejected as unsupported
     const protocolVersion =
       ctx.req.header('mcp-protocol-version') ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION
 
     if (!SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {
-      throw new HTTPException(400, {
-        res: Response.json({
+      return Response.json(
+        {
           jsonrpc: '2.0',
           error: {
             code: ErrorCode.ConnectionClosed,
             message: `Bad Request: Unsupported protocol version (supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(', ')})`,
           },
           id: null,
-        }),
-      })
+        },
+        { status: 400 }
+      )
     }
-    return true
+    return undefined
   }
 
   async close(): Promise<void> {
