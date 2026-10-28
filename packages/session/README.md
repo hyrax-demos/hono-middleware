@@ -118,6 +118,8 @@ update(`data`): `Promise`<`void`>
 
 Update the current session with the provided session data.
 
+`update()` (and the value returned by a `get(refresh)` callback) replaces the stored session data rather than merging into it, in both stateless and storage modes.
+
 #### Parameters
 
 | Parameter | Type                                    | Description                         |

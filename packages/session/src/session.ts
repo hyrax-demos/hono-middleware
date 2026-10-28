@@ -235,7 +235,7 @@ export function getSession<Data extends SessionData>({
       payload = createCookie()
     }
 
-    // Merge session data with the stateless session cookie
+    // Replace the stateless cookie's session data with the refreshed data, keeping exp, iat and sid
     if (!storage) {
       const cookie = getStatelessCookie(payload, data)
       payload = { ...cookie.payload, ...cookie.data }
@@ -271,7 +271,8 @@ export function getSession<Data extends SessionData>({
   /**
    * Update the session with new session data.
    *
-   * Optionally merges session data with a stateless session cookie.
+   * Without storage, replaces the stateless cookie's session data with the given data,
+   * keeping only `exp`, `iat` and `sid` from the existing payload.
    */
   function updateSession(data: Data, payload?: cookies.CookiePayload): UpdateSession<Data> {
     payload ??= createCookie(data)
@@ -287,7 +288,7 @@ export function getSession<Data extends SessionData>({
   /**
    * Create a session cookie with a new session id.
    *
-   * Optionally merges session data with a stateless session cookie.
+   * Without storage, sets the new stateless cookie's session data to the given data.
    */
   function createCookie(init?: SessionData): SessionCookie {
     // Always generate a new session id to avoid session fixation attacks
@@ -333,10 +334,12 @@ export function getSession<Data extends SessionData>({
 }
 
 /**
- * Shallow merge session data with the session cookie,
- * ensuring that the original `exp`, `iat`, and `sid` claims are preserved.
+ * Split a stateless session cookie payload: only the `exp`, `iat` and `sid` claims
+ * are kept from the payload. When `data` is given it becomes the session data exactly
+ * (replacing any other payload keys); otherwise the payload's other keys are returned
+ * as the data.
  */
 function getStatelessCookie(payload: SessionCookie, data?: SessionData | null) {
   const { exp, iat, sid, ...rest } = payload
-  return { payload: { exp, iat, sid }, data: { ...rest, ...data } }
+  return { payload: { exp, iat, sid }, data: data === undefined ? rest : data }
 }

@@ -317,6 +317,93 @@ describe('session.update(fn)', () => {
   })
 })
 
+describe('stateless session data replacement', () => {
+  type CartData = { userId?: string; cart?: string }
+
+  const refresh = vi.fn<Refresh<CartData>>()
+
+  const app = new Hono()
+    .put('/checkout', useSession<CartData>({ secret }), async (c) => {
+      await c.var.session.update((data) => {
+        const { cart, ...rest } = data ?? {}
+        return rest
+      })
+      return c.json(c.var.session.data)
+    })
+    .put('/login', useSession<CartData>({ secret }), async (c) => {
+      await c.var.session.update({ userId: '1' })
+      return c.json(c.var.session.data)
+    })
+    .get('/me', useSession<CartData>({ secret }), async (c) => {
+      return c.json(await c.var.session.get())
+    })
+    .get(
+      '/refresh',
+      useSession<CartData>({ secret, duration: { absolute: offset * 3 } }),
+      async (c) => {
+        return c.json(await c.var.session.get(refresh))
+      }
+    )
+
+  it('drops a key removed by update(fn) from the cookie and the next request', async () => {
+    // Input: an existing cookie holding userId '1' and cart 'abc'; the update fn removes cart.
+    const cookie = await encrypt({ ...session.payload, userId: '1', cart: 'abc' })
+    const res = await app.request('/checkout', {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ userId: '1' })
+    expect(sessionCookie?.payload.cart).toBeUndefined()
+    expect(sessionCookie?.payload.userId).toStrictEqual('1')
+
+    const next = await app.request('/me', {
+      headers: { cookie: `sid=${sessionCookie?.value}` },
+    })
+
+    expect(next.status).toBe(200)
+    expect(await next.json()).toStrictEqual({ userId: '1' })
+  })
+
+  it('drops a key left out of the object passed to update()', async () => {
+    // Input: an existing cookie holding userId '1' and cart 'abc'; update() receives only userId.
+    const cookie = await encrypt({ ...session.payload, userId: '1', cart: 'abc' })
+    const res = await app.request('/login', {
+      method: 'PUT',
+      headers: { cookie: `sid=${cookie}` },
+    })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(res.status).toBe(200)
+    expect(sessionCookie?.payload.cart).toBeUndefined()
+    expect(sessionCookie?.payload.userId).toStrictEqual('1')
+  })
+
+  it('drops a key left out of the value returned by refresh', async () => {
+    // Input: an expired cookie holding userId '1' and cart 'abc'; refresh returns only userId.
+    refresh.mockResolvedValue({ userId: '1' })
+    const expiredSession = {
+      ...session.payload,
+      exp: recent,
+      iat: recent,
+      userId: '1',
+      cart: 'abc',
+    }
+    const cookie = await encrypt(expiredSession)
+    const res = await app.request('/refresh', { headers: { cookie: `sid=${cookie}` } })
+    const sessionCookie = await getSetCookie(res, 'sid', decrypt)
+
+    expect(refresh).toHaveBeenCalledWith({ userId: '1', cart: 'abc' })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toStrictEqual({ userId: '1' })
+    expect(sessionCookie?.payload.sid).toStrictEqual(expiredSession.sid)
+    expect(sessionCookie?.payload.cart).toBeUndefined()
+    expect(sessionCookie?.payload.userId).toStrictEqual('1')
+  })
+})
+
 describe('session.delete()', () => {
   const app = new Hono().delete('/session', useSession<TestData>({ secret }), async (c) => {
     c.var.session.delete()
