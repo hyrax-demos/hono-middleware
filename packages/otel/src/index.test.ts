@@ -380,6 +380,101 @@ describe('OpenTelemetry middleware - Spans (combined)', () => {
   })
 })
 
+describe('OpenTelemetry middleware - getUrlFull', () => {
+  // Every case requests a URL whose query string carries a one-time token, so a
+  // test that sees the raw URL recorded would leak `abc123` into url.full.
+  const requestUrl = 'http://localhost/reset?token=abc123&user=1'
+  let memoryExporter: InMemorySpanExporter
+  let tracerProvider: NodeTracerProvider
+
+  beforeEach(() => {
+    const { exporter, tracerProvider: provider } = createTestTracer()
+    memoryExporter = exporter
+    tracerProvider = provider
+    memoryExporter.reset()
+  })
+
+  it('Should record the redacted URL returned by getUrlFull', async () => {
+    const app2 = new Hono()
+    app2.use(
+      httpInstrumentationMiddleware({
+        tracerProvider,
+        getUrlFull: (c: Context) => {
+          const url = new URL(c.req.url)
+          url.searchParams.set('token', 'REDACTED')
+          return url.toString()
+        },
+      })
+    )
+    app2.get('/reset', (c) => c.text('ok'))
+    await app2.request(requestUrl)
+    const [span] = memoryExporter.getFinishedSpans()
+    assert.strictEqual(
+      span.attributes[ATTR_URL_FULL],
+      'http://localhost/reset?token=REDACTED&user=1'
+    )
+    assert.ok(!String(span.attributes[ATTR_URL_FULL]).includes('abc123'))
+  })
+
+  it('Should omit url.full when getUrlFull returns undefined', async () => {
+    const app2 = new Hono()
+    app2.use(httpInstrumentationMiddleware({ tracerProvider, getUrlFull: () => undefined }))
+    app2.get('/reset', (c) => c.text('ok'))
+    await app2.request(requestUrl)
+    const [span] = memoryExporter.getFinishedSpans()
+    assert.ok(!(ATTR_URL_FULL in span.attributes))
+  })
+
+  it('Should omit url.full when getUrlFull returns an empty string', async () => {
+    const app2 = new Hono()
+    app2.use(httpInstrumentationMiddleware({ tracerProvider, getUrlFull: () => '' }))
+    app2.get('/reset', (c) => c.text('ok'))
+    await app2.request(requestUrl)
+    const [span] = memoryExporter.getFinishedSpans()
+    assert.ok(!(ATTR_URL_FULL in span.attributes))
+  })
+
+  it('Should omit url.full and still serve the request when getUrlFull throws', async () => {
+    const app2 = new Hono()
+    app2.use(
+      httpInstrumentationMiddleware({
+        tracerProvider,
+        getUrlFull: () => {
+          throw new Error('boom')
+        },
+      })
+    )
+    app2.get('/reset', (c) => c.text('ok'))
+    const response = await app2.request(requestUrl)
+    assert.strictEqual(response.status, 200)
+    const spans = memoryExporter.getFinishedSpans()
+    assert.strictEqual(spans.length, 1)
+    const [span] = spans
+    assert.ok(!(ATTR_URL_FULL in span.attributes))
+    assert.notStrictEqual(span.attributes[ATTR_URL_FULL], requestUrl)
+  })
+
+  it('Should record the raw URL with its query string when getUrlFull is not set', async () => {
+    const app2 = new Hono()
+    app2.use(httpInstrumentationMiddleware({ tracerProvider }))
+    app2.get('/reset', (c) => c.text('ok'))
+    await app2.request(requestUrl)
+    const [span] = memoryExporter.getFinishedSpans()
+    assert.strictEqual(span.attributes[ATTR_URL_FULL], requestUrl)
+  })
+
+  it('Should call getUrlFull once with the request context', async () => {
+    const getUrlFull = vi.fn((c: Context) => c.req.url)
+    const app2 = new Hono()
+    app2.use(httpInstrumentationMiddleware({ tracerProvider, getUrlFull }))
+    app2.get('/reset', (c) => c.text('ok'))
+    await app2.request(requestUrl)
+    assert.strictEqual(getUrlFull.mock.calls.length, 1)
+    const [ctx] = getUrlFull.mock.calls[0]
+    assert.strictEqual(ctx.req.url, requestUrl)
+  })
+})
+
 describe('OpenTelemetry middleware - Metrics (combined)', () => {
   let memoryMetricExporter: InMemoryMetricExporter
   let meterProvider: MeterProvider

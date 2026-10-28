@@ -61,6 +61,26 @@ export const httpInstrumentationMiddleware = (
 
   const spanName = (c: Context) => config.spanNameFactory?.(c) ?? `${c.req.method} ${routePath(c)}`
 
+  // Resolves the `url.full` span attribute. Without `getUrlFull` the raw request
+  // URL is recorded. With it, only a non-empty string result is recorded; any
+  // other result or a throw omits the attribute, never falling back to the raw
+  // URL, since the hook may exist to keep a secret out of the span.
+  const urlFullAttributes = (c: Context): Attributes => {
+    if (!config.getUrlFull) {
+      return { [ATTR_URL_FULL]: c.req.url }
+    }
+    try {
+      const resolved = config.getUrlFull(c)
+      if (typeof resolved === 'string' && resolved.length > 0) {
+        return { [ATTR_URL_FULL]: resolved }
+      }
+    } catch {
+      // Ignore errors from the user-supplied URL resolver and omit the attribute
+      // so the request still produces a clean span.
+    }
+    return {}
+  }
+
   const activeReqs = config.captureActiveRequests ? createActiveRequestsTracker(config) : undefined
   const requestDuration = createRequestDurationTracker(config)
 
@@ -158,6 +178,8 @@ export const httpInstrumentationMiddleware = (
       return
     }
 
+    const urlFullAttrs = urlFullAttributes(c)
+
     return tracer.startActiveSpan(
       spanName(c),
       {
@@ -165,7 +187,7 @@ export const httpInstrumentationMiddleware = (
         startTime: config.getTime?.(),
         attributes: {
           ...stableAttrs,
-          [ATTR_URL_FULL]: c.req.url,
+          ...urlFullAttrs,
           [ATTR_HTTP_ROUTE]: routePath(c),
         },
       },
