@@ -47,6 +47,22 @@ const transport = new StreamableHTTPTransport()
 const transport = new StreamableHTTPTransport({ strictAcceptHeader: true })
 ```
 
+### Error responses
+
+`handleRequest` returns protocol-level refusals as `Response` objects with a JSON-RPC error body (`{ jsonrpc: '2.0', error: { code, message }, id: null }`) instead of throwing them. Your route returns them as they are, so a host `app.onError` handler does not change their status or body.
+
+| Status | When                                                                                                                                                                                                                                    |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | Unsupported or repeated `MCP-Protocol-Version`; missing or repeated `Mcp-Session-Id`; server not initialized; server already initialized; more than one initialize request in a batch; a request body that cannot be parsed as JSON-RPC |
+| `403`  | `Host` or `Origin` header rejected by DNS rebinding protection (`enableDnsRebindingProtection`)                                                                                                                                         |
+| `404`  | `Mcp-Session-Id` does not match the transport's session. Per the MCP spec, a client that receives this starts a new session with a new `InitializeRequest`                                                                              |
+| `405`  | Unsupported HTTP method; the response carries an `Allow: GET, POST, DELETE` header                                                                                                                                                      |
+| `406`  | `Accept` header does not allow the response type (see `strictAcceptHeader`)                                                                                                                                                             |
+| `409`  | A standalone GET SSE stream is already open for the session                                                                                                                                                                             |
+| `415`  | POST `Content-Type` is not `application/json`                                                                                                                                                                                           |
+
+The session checks (`Mcp-Session-Id`, initialization state) apply only when `sessionIdGenerator` is set. Errors raised while an SSE stream is already being written (for example a failure replaying events from the `eventStore`) happen after the response has started, so they are not HTTP responses.
+
 ## Auth
 
 The simplest way to setup MCP Auth when using 3rd party auth providers.

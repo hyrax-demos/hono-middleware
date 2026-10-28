@@ -1014,7 +1014,7 @@ describe('MCP helper', () => {
         body: JSON.stringify(TEST_MESSAGES.toolsList),
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
@@ -1060,7 +1060,7 @@ describe('MCP helper', () => {
         },
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
@@ -1081,13 +1081,113 @@ describe('MCP helper', () => {
         },
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
         -32000,
         /Bad Request: Unsupported protocol version \(supported versions: .+\)/
       )
+    })
+
+    it('should answer an unsupported version with 400, not 404, for a valid session', async () => {
+      // A 404 on a request carrying Mcp-Session-Id tells the client its session
+      // expired, so a version refusal must not use it. Input: the live session
+      // id together with the unlisted version 2026-06-18.
+      sessionId = await initializeServer()
+
+      const response = await server.request('/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'mcp-session-id': sessionId,
+          'mcp-protocol-version': '2026-06-18',
+        },
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData: unknown = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Unsupported protocol version \(supported versions: .+\)/
+      )
+    })
+
+    it('should reject a repeated MCP-Protocol-Version header with 400', async () => {
+      // Input: the header sent twice with two supported values; Headers.get
+      // joins them into "2025-03-26, 2024-11-05", which is not a listed version.
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-session-id', sessionId],
+        ['mcp-protocol-version', '2025-03-26'],
+        ['mcp-protocol-version', '2024-11-05'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData: unknown = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Unsupported protocol version \(supported versions: .+\)/
+      )
+    })
+  })
+
+  describe('session id header validation', () => {
+    it('should reject a repeated Mcp-Session-Id header with 400, not 404', async () => {
+      // Input: the valid session id sent twice; Headers.get joins it into
+      // "<id>, <id>", which must be reported as malformed, not as an unknown session.
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['mcp-session-id', sessionId],
+        ['mcp-session-id', sessionId],
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-protocol-version', '2025-03-26'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData: unknown = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Mcp-Session-Id header must be a single value/
+      )
+    })
+
+    it('should still accept a single valid Mcp-Session-Id header', async () => {
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['mcp-session-id', sessionId],
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-protocol-version', '2025-03-26'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(200)
     })
   })
 })
@@ -2402,3 +2502,288 @@ async function createTestServerWithDnsProtection(config: {
     mcpServer,
   }
 }
+
+/**
+ * Helper to mount the transport on a host app that defines its own app.onError and
+ * calls handleRequest with no route-level try/catch. Any refusal that the transport
+ * throws instead of returning is turned into a 500 by this host.
+ */
+async function createTestServerWithOnError(config: {
+  sessionIdGenerator: (() => string) | undefined
+  allowedHosts?: string[]
+  enableDnsRebindingProtection?: boolean
+}): Promise<{
+  server: Hono
+  transport: StreamableHTTPTransport
+  mcpServer: McpServer
+}> {
+  const mcpServer = new McpServer(
+    { name: 'test-server', version: '1.0.0' },
+    { capabilities: { logging: {} } }
+  )
+
+  mcpServer.registerTool(
+    'greet',
+    {
+      description: 'A simple greeting tool',
+      inputSchema: { name: z.string().describe('Name to greet') },
+    },
+    ({ name }): CallToolResult => {
+      return { content: [{ type: 'text', text: `Hello, ${name}!` }] }
+    }
+  )
+
+  const transport = new StreamableHTTPTransport({
+    sessionIdGenerator: config.sessionIdGenerator,
+    allowedHosts: config.allowedHosts,
+    enableDnsRebindingProtection: config.enableDnsRebindingProtection,
+  })
+
+  await mcpServer.connect(transport)
+
+  const server = new Hono()
+    .onError((_err, c) => c.json({ error: 'internal error' }, 500))
+    .all(async (c) => {
+      return transport.handleRequest(c)
+    })
+
+  return { server, transport, mcpServer }
+}
+
+describe('host app.onError does not override transport refusals', () => {
+  let server: Hono
+  let transport: StreamableHTTPTransport
+
+  afterEach(async () => {
+    await stopTestServer({ transport })
+  })
+
+  async function setup(sessionIdGenerator: (() => string) | undefined): Promise<void> {
+    const result = await createTestServerWithOnError({ sessionIdGenerator })
+    server = result.server
+    transport = result.transport
+  }
+
+  async function initialize(): Promise<string> {
+    const response = await sendPostRequest(server, TEST_MESSAGES.initialize)
+    expect(response.status).toBe(200)
+    const sessionId = response.headers.get('mcp-session-id')
+    expect(sessionId).toBeTruthy()
+    return sessionId as string
+  }
+
+  const unsupportedVersion = /Bad Request: Unsupported protocol version \(supported versions: .+\)/
+
+  it('returns 400 for an unsupported protocol version on POST in stateless mode', async () => {
+    // Input: the unlisted version 2026-06-18 on the default stateless transport.
+    await setup(undefined)
+
+    const response = await server.request('/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2026-06-18',
+      },
+      body: JSON.stringify(TEST_MESSAGES.toolsList),
+    })
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32000, unsupportedVersion)
+  })
+
+  it('returns 400 for an unsupported protocol version on POST in session mode', async () => {
+    // Input: the unlisted version 2026-06-18 together with a live session id.
+    await setup(() => crypto.randomUUID())
+    const sessionId = await initialize()
+
+    const response = await server.request('/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': '2026-06-18',
+      },
+      body: JSON.stringify(TEST_MESSAGES.toolsList),
+    })
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32000, unsupportedVersion)
+  })
+
+  it('returns 406 for a POST whose Accept header lists neither JSON nor SSE', async () => {
+    await setup(undefined)
+
+    const response = await sendPostRequest(server, TEST_MESSAGES.initialize, undefined, {
+      Accept: 'text/plain',
+    })
+
+    expect(response.status).toBe(406)
+    expectErrorResponse(await response.json(), -32000, /Not Acceptable/)
+  })
+
+  it('returns 415 for a POST with a non-JSON Content-Type', async () => {
+    await setup(undefined)
+
+    const response = await sendPostRequest(server, TEST_MESSAGES.initialize, undefined, {
+      'Content-Type': 'text/plain',
+    })
+
+    expect(response.status).toBe(415)
+    expectErrorResponse(await response.json(), -32000, /Unsupported Media Type/)
+  })
+
+  it('returns 400 ParseError for a POST with invalid JSON', async () => {
+    await setup(undefined)
+
+    const response = await server.request('/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: 'This is not valid JSON',
+    })
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32700, /Parse error/)
+  })
+
+  it('returns 400 for a second initialize in session mode', async () => {
+    await setup(() => crypto.randomUUID())
+    await initialize()
+
+    const response = await sendPostRequest(server, {
+      ...TEST_MESSAGES.initialize,
+      id: 'second-init',
+    } as JSONRPCMessage)
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32600, /Server already initialized/)
+  })
+
+  it('returns 400 when the Mcp-Session-Id header is missing', async () => {
+    await setup(() => crypto.randomUUID())
+    await initialize()
+
+    const response = await sendPostRequest(server, TEST_MESSAGES.toolsList)
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32000, /Mcp-Session-Id header is required/)
+  })
+
+  it('returns 404 for an unknown session id', async () => {
+    await setup(() => crypto.randomUUID())
+    await initialize()
+
+    const response = await sendPostRequest(server, TEST_MESSAGES.toolsList, 'unknown-session-id')
+
+    expect(response.status).toBe(404)
+    expectErrorResponse(await response.json(), -32001, /Session not found/)
+  })
+
+  it('returns 400 for a duplicated Mcp-Session-Id header', async () => {
+    // Input: the live session id sent twice, which Headers.get joins with ", ".
+    await setup(() => crypto.randomUUID())
+    const sessionId = await initialize()
+
+    const headers = new Headers([
+      ['mcp-session-id', sessionId],
+      ['mcp-session-id', sessionId],
+      ['content-type', 'application/json'],
+      ['accept', 'application/json, text/event-stream'],
+      ['mcp-protocol-version', '2025-03-26'],
+    ])
+    const response = await server.request('/', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(TEST_MESSAGES.toolsList),
+    })
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(
+      await response.json(),
+      -32000,
+      /Bad Request: Mcp-Session-Id header must be a single value/
+    )
+  })
+
+  it('returns 406 for a GET that does not accept text/event-stream', async () => {
+    await setup(() => crypto.randomUUID())
+    const sessionId = await initialize()
+
+    const response = await server.request('/', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': '2025-03-26',
+      },
+    })
+
+    expect(response.status).toBe(406)
+    expectErrorResponse(await response.json(), -32000, /Client must accept text\/event-stream/)
+  })
+
+  it('returns 409 for a second standalone GET SSE stream', async () => {
+    await setup(() => crypto.randomUUID())
+    const sessionId = await initialize()
+
+    const getHeaders = {
+      Accept: 'text/event-stream',
+      'mcp-session-id': sessionId,
+      'mcp-protocol-version': '2025-03-26',
+    }
+    const firstStream = await server.request('/', { method: 'GET', headers: getHeaders })
+    expect(firstStream.status).toBe(200)
+
+    const secondStream = await server.request('/', { method: 'GET', headers: getHeaders })
+
+    expect(secondStream.status).toBe(409)
+    expectErrorResponse(
+      await secondStream.json(),
+      -32000,
+      /Only one SSE stream is allowed per session/
+    )
+  })
+
+  it('returns 400 for a DELETE with an unsupported protocol version', async () => {
+    await setup(() => crypto.randomUUID())
+    const sessionId = await initialize()
+
+    const response = await server.request('/', {
+      method: 'DELETE',
+      headers: {
+        'mcp-session-id': sessionId,
+        'mcp-protocol-version': '2026-06-18',
+      },
+    })
+
+    expect(response.status).toBe(400)
+    expectErrorResponse(await response.json(), -32000, unsupportedVersion)
+  })
+
+  it('returns 403 for a disallowed Host header under DNS rebinding protection', async () => {
+    const result = await createTestServerWithOnError({
+      sessionIdGenerator: undefined,
+      allowedHosts: ['example.com:3001'],
+      enableDnsRebindingProtection: true,
+    })
+    server = result.server
+    transport = result.transport
+
+    const response = await server.request('/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify(TEST_MESSAGES.initialize),
+    })
+
+    expect(response.status).toBe(403)
+    const body: unknown = await response.json()
+    expectErrorResponse(body, -32000, /Invalid Host header:/)
+  })
+})
