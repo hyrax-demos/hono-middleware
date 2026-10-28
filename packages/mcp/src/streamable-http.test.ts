@@ -1651,10 +1651,10 @@ describe('disconnected client', () => {
   const storedEvents = new Map<string, { eventId: string; message: JSONRPCMessage }>()
 
   const eventStore: EventStore = {
-    async storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
+    storeEvent(streamId: string, message: JSONRPCMessage): Promise<string> {
       const eventId = `${streamId}_${crypto.randomUUID()}`
       storedEvents.set(eventId, { eventId, message })
-      return eventId
+      return Promise.resolve(eventId)
     },
     async replayEventsAfter(
       lastEventId: EventId,
@@ -1696,17 +1696,28 @@ describe('disconnected client', () => {
     const gate = new Promise<void>((resolve) => {
       releaseTool = resolve
     })
-    mcpServer.tool('gated', 'Returns once the test releases it', async (extra) => {
-      if (config?.notifyOnStart) {
-        // Gives the client an event id on the POST stream to resume from
-        await extra.sendNotification({
-          method: 'notifications/message',
-          params: { level: 'info', data: 'gated started' },
-        })
+    mcpServer.registerTool(
+      'gated',
+      { description: 'Returns once the test releases it' },
+      async (extra) => {
+        if (config?.notifyOnStart) {
+          // Gives the client an event id on the POST stream to resume from
+          await extra.sendNotification({
+            method: 'notifications/message',
+            params: { level: 'info', data: 'gated started' },
+          })
+        }
+        await gate
+        return { content: [{ type: 'text', text: 'gated done' }] }
       }
-      await gate
-      return { content: [{ type: 'text', text: 'gated done' }] }
-    })
+    )
+  }
+
+  function bodyReader(response: Response): ReadableStreamDefaultReader<Uint8Array> {
+    if (!response.body) {
+      throw new Error('Response has no body')
+    }
+    return response.body.getReader()
   }
 
   function callGated(id: string): JSONRPCMessage {
@@ -1754,7 +1765,7 @@ describe('disconnected client', () => {
 
     const response = await sendPostRequest(server, callGated('call-a'), sessionId)
     expect(response.status).toBe(200)
-    const reader = response.body!.getReader()
+    const reader = bodyReader(response)
     await reader.cancel()
     await vi.waitFor(() => {
       expect(abortSpy).toHaveBeenCalled()
@@ -1788,7 +1799,7 @@ describe('disconnected client', () => {
     const response = await sendPostRequest(server, batch, sessionId)
     expect(response.status).toBe(200)
 
-    const reader = response.body!.getReader()
+    const reader = bodyReader(response)
     const decoder = new TextDecoder()
     let received = ''
     while (!received.includes('"id":"batch-x"')) {
@@ -1825,13 +1836,13 @@ describe('disconnected client', () => {
     const response = await sendPostRequest(server, callGated('call-c'), sessionId)
     expect(response.status).toBe(200)
 
-    const reader = response.body!.getReader()
+    const reader = bodyReader(response)
     const { value } = await reader.read()
     const text = new TextDecoder().decode(value)
     expect(text).toContain('gated started')
     const idMatch = text.match(/id: ([^\n]+)/)
     expect(idMatch).toBeTruthy()
-    const lastEventId = idMatch![1]
+    const lastEventId = idMatch?.[1] ?? ''
 
     await reader.cancel()
     await vi.waitFor(() => {
@@ -1918,11 +1929,15 @@ describe('request state cleanup', () => {
     const gate = new Promise<void>(() => {
       // Never resolved: the request stays in flight until the transport is closed
     })
-    result.mcpServer.tool('never-ends', 'Waits on a gate that is never released', async () => {
-      started = true
-      await gate
-      return { content: [{ type: 'text', text: 'unreachable' }] }
-    })
+    result.mcpServer.registerTool(
+      'never-ends',
+      { description: 'Waits on a gate that is never released' },
+      async () => {
+        started = true
+        await gate
+        return { content: [{ type: 'text', text: 'unreachable' }] }
+      }
+    )
 
     const response = await sendPostRequest(
       server,
