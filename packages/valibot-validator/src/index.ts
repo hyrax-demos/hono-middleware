@@ -9,6 +9,9 @@ import type {
 } from 'valibot'
 import { safeParseAsync } from 'valibot'
 
+/**
+ * Body of the default 400 response. For `header` validation the `cookie` header is removed from it.
+ */
 export type FailedResponse<T extends GenericSchema | GenericSchemaAsync> =
   SafeParseResult<T> extends infer U
     ? Response & TypedResponse<U extends { success: false } ? U : never, 400, 'json'>
@@ -37,6 +40,116 @@ export type Hook<
 ) => R
 
 type HasUndefined<T> = undefined extends T ? true : false
+
+const RESTRICTED_DATA_FIELDS = {
+  header: ['cookie'],
+}
+
+const REDACTED = '[redacted]'
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const omitFields = (value: unknown, fields: string[]): unknown =>
+  isPlainObject(value)
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => !fields.includes(key)))
+    : value
+
+const redact = (text: unknown, secrets: string[]): unknown =>
+  typeof text === 'string'
+    ? secrets.reduce((acc, secret) => acc.split(secret).join(REDACTED), text)
+    : text
+
+/**
+ * `inheritedSecrets` is set when a parent issue's path reaches a restricted field:
+ * valibot's nested sub-issues (e.g. from `union`) carry no path of their own.
+ */
+const sanitizeIssue = (
+  issue: unknown,
+  fields: string[],
+  inheritedSecrets?: readonly string[]
+): unknown => {
+  if (!isPlainObject(issue)) {
+    return issue
+  }
+
+  const secrets: string[] = [...(inheritedSecrets ?? [])]
+  let restrictedPath = inheritedSecrets !== undefined
+  const rawPath = issue['path']
+  const path = Array.isArray(rawPath)
+    ? rawPath.map((item: unknown) => {
+        if (!isPlainObject(item)) {
+          return item
+        }
+        const itemInput = item['input']
+        if (isPlainObject(itemInput)) {
+          for (const field of fields) {
+            const secret = itemInput[field]
+            if (typeof secret === 'string' && secret !== '') {
+              secrets.push(secret)
+            }
+          }
+        }
+        const copy: Record<string, unknown> = { ...item, input: omitFields(itemInput, fields) }
+        const itemKey = item['key']
+        if (typeof itemKey === 'string' && fields.includes(itemKey)) {
+          restrictedPath = true
+          return Object.fromEntries(Object.entries(copy).filter(([key]) => key !== 'value'))
+        }
+        return copy
+      })
+    : rawPath
+
+  const input = issue['input']
+  if (restrictedPath && typeof input === 'string' && input !== '') {
+    secrets.push(input)
+  }
+
+  const subIssues = issue['issues']
+  const sanitized: Record<string, unknown> = {
+    ...issue,
+    input: omitFields(input, fields),
+    ...(path !== undefined && { path }),
+    ...(Array.isArray(subIssues) && {
+      issues: subIssues.map((subIssue: unknown) =>
+        sanitizeIssue(subIssue, fields, restrictedPath ? secrets : undefined)
+      ),
+    }),
+  }
+
+  if (!restrictedPath) {
+    return sanitized
+  }
+
+  return Object.fromEntries(
+    Object.entries(sanitized)
+      .filter(([key]) => key !== 'input')
+      .map(([key, value]) =>
+        key === 'message' || key === 'received' ? [key, redact(value, secrets)] : [key, value]
+      )
+  )
+}
+
+/**
+ * Returns a copy of `result` without the fields restricted for `target`.
+ * The original result is not modified.
+ */
+const sanitizeResult = <T>(result: T, target: keyof ValidationTargets): T => {
+  if (!(target in RESTRICTED_DATA_FIELDS) || !isPlainObject(result)) {
+    return result
+  }
+  const fields = RESTRICTED_DATA_FIELDS[target as keyof typeof RESTRICTED_DATA_FIELDS]
+
+  const issues = result['issues']
+  return {
+    typed: result['typed'],
+    success: result['success'],
+    output: omitFields(result['output'], fields),
+    issues: Array.isArray(issues)
+      ? issues.map((issue: unknown) => sanitizeIssue(issue, fields))
+      : issues,
+  } as T
+}
 
 export const vValidator = <
   T extends GenericSchema | GenericSchemaAsync,
@@ -86,7 +199,7 @@ export const vValidator = <
     }
 
     if (!result.success) {
-      return c.json(result, 400)
+      return c.json(sanitizeResult(result, target), 400)
     }
 
     return result.output
