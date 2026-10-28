@@ -9,6 +9,8 @@ import type { CallToolResult, JSONRPCMessage } from '@modelcontextprotocol/sdk/t
 import type { Context } from 'hono'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
+import { SSEStreamingApi } from 'hono/streaming'
+import type { Mock, MockInstance } from 'vitest'
 import * as z from 'zod/v4'
 import { StreamableHTTPTransport } from './streamable-http'
 
@@ -1634,6 +1636,218 @@ describe('StreamableHTTPServerTransport with resumability', () => {
     })
 
     await stopTestServer({ transport: result.transport })
+  })
+
+  describe('disconnected client', () => {
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('still replays a result produced after the POST stream was cancelled', async () => {
+      // Input: the client cancels the POST SSE body after the first event and only
+      // then does the tool return; the client resumes with GET + Last-Event-ID.
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      mcpServer.registerTool('gated', { description: 'Waits for the test' }, async (extra) => {
+        await extra.sendNotification({
+          method: 'notifications/message',
+          params: { level: 'info', data: 'gated tool started' },
+        })
+        await gate
+        return { content: [{ type: 'text', text: 'late result' }] }
+      })
+      const abortSpy = vi.spyOn(SSEStreamingApi.prototype, 'abort')
+
+      const response = await sendPostRequest(
+        server,
+        {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: { name: 'gated', arguments: {} },
+          id: 'late-1',
+        },
+        sessionId
+      )
+      expect(response.status).toBe(200)
+      if (!response.body) {
+        throw new Error('No response body')
+      }
+
+      const reader = response.body.getReader()
+      const { value } = await reader.read()
+      const text = new TextDecoder().decode(value)
+      expect(text).toContain('gated tool started')
+      const firstEventId = text.match(/id: ([^\n]+)/)?.[1]
+      expect(firstEventId).toBeDefined()
+
+      const abortsBefore = abortSpy.mock.calls.length
+      await reader.cancel()
+      await vitest.waitFor(() => {
+        expect(abortSpy.mock.calls.length).toBeGreaterThan(abortsBefore)
+      })
+
+      release()
+      await vitest.waitFor(() => {
+        const stored = Array.from(storedEvents.values()).map(({ message }) => message)
+        expect(stored).toContainEqual(expect.objectContaining({ id: 'late-1' }))
+      })
+
+      const reconnectResponse = await server.request('/', {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          'mcp-session-id': sessionId,
+          'last-event-id': firstEventId ?? '',
+          'mcp-protocol-version': '2025-03-26',
+        },
+      })
+      expect(reconnectResponse.status).toBe(200)
+
+      const reconnectText = await readNSSEEvents(reconnectResponse, 1)
+      expect(reconnectText).toContain('"id":"late-1"')
+      expect(reconnectText).toContain('late result')
+    })
+  })
+})
+
+// Results whose client has gone away must not be retained by the transport
+describe('disconnected client', () => {
+  let server: Hono
+  let transport: StreamableHTTPTransport
+  let mcpServer: McpServer
+  let sessionId: string
+  let onerror: Mock<(error: Error) => void>
+  let sendSpy: MockInstance<StreamableHTTPTransport['send']>
+  let abortSpy: MockInstance<SSEStreamingApi['abort']>
+  let release: () => void
+
+  beforeEach(async () => {
+    const result = await createTestServer()
+    server = result.server
+    transport = result.transport
+    mcpServer = result.mcpServer
+
+    const initResponse = await sendPostRequest(server, TEST_MESSAGES.initialize)
+    sessionId = initResponse.headers.get('mcp-session-id') as string
+    expect(sessionId).toBeDefined()
+
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mcpServer.registerTool('gated', { description: 'Waits for the test' }, async () => {
+      await gate
+      return { content: [{ type: 'text', text: 'gated result' }] }
+    })
+
+    onerror = vi.fn<(error: Error) => void>()
+    mcpServer.server.onerror = onerror
+    sendSpy = vi.spyOn(transport, 'send')
+    abortSpy = vi.spyOn(SSEStreamingApi.prototype, 'abort')
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await stopTestServer({ transport })
+  })
+
+  async function cancelAndWaitForAbort(reader: ReadableStreamDefaultReader<Uint8Array>) {
+    const abortsBefore = abortSpy.mock.calls.length
+    await reader.cancel()
+    await vitest.waitFor(() => {
+      expect(abortSpy.mock.calls.length).toBeGreaterThan(abortsBefore)
+    })
+  }
+
+  async function sendPromiseFor(id: string | number): Promise<{ settled: Promise<unknown> }> {
+    let index = -1
+    await vitest.waitFor(() => {
+      index = sendSpy.mock.calls.findIndex(
+        ([message]) => 'id' in message && message.id === id && !('method' in message)
+      )
+      expect(index).toBeGreaterThan(-1)
+    })
+    return { settled: sendSpy.mock.results[index].value as Promise<unknown> }
+  }
+
+  function bodyReader(response: Response): ReadableStreamDefaultReader<Uint8Array> {
+    if (!response.body) {
+      throw new Error('No response body')
+    }
+    return response.body.getReader()
+  }
+
+  it('drops the result when the client cancels the SSE body before the tool returns', async () => {
+    // Input: a single tools/call whose POST SSE body is cancelled while the tool
+    // is still waiting, after which the tool produces its result.
+    const response = await sendPostRequest(
+      server,
+      {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'gated', arguments: {} },
+        id: 101,
+      },
+      sessionId
+    )
+    expect(response.status).toBe(200)
+
+    await cancelAndWaitForAbort(bodyReader(response))
+    release()
+
+    const { settled } = await sendPromiseFor(101)
+    await expect(settled).resolves.toBeUndefined()
+    expect(onerror).not.toHaveBeenCalled()
+
+    // The request mapping is gone, so a second result for the same id has no target
+    await expect(
+      transport.send({ jsonrpc: '2.0', id: 101, result: { content: [] } })
+    ).rejects.toThrow(/No connection established/)
+  })
+
+  it('drops the whole batch when the client disconnects after a partial response', async () => {
+    // Input: a batch where one request is answered and read before the client
+    // cancels the stream, and the other is answered only after the cancel.
+    const response = await sendPostRequest(
+      server,
+      [
+        {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: { name: 'greet', arguments: { name: 'Batch' } },
+          id: 'batch-x',
+        },
+        {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: { name: 'gated', arguments: {} },
+          id: 'batch-y',
+        },
+      ],
+      sessionId
+    )
+    expect(response.status).toBe(200)
+
+    const reader = bodyReader(response)
+    const { value } = await reader.read()
+    const text = new TextDecoder().decode(value)
+    expect(text).toContain('"id":"batch-x"')
+    expect(text).toContain('Hello, Batch!')
+
+    await cancelAndWaitForAbort(reader)
+    release()
+
+    const { settled } = await sendPromiseFor('batch-y')
+    await expect(settled).resolves.toBeUndefined()
+    expect(onerror).not.toHaveBeenCalled()
+
+    await expect(
+      transport.send({ jsonrpc: '2.0', id: 'batch-x', result: { content: [] } })
+    ).rejects.toThrow(/No connection established/)
+    await expect(
+      transport.send({ jsonrpc: '2.0', id: 'batch-y', result: { content: [] } })
+    ).rejects.toThrow(/No connection established/)
   })
 })
 
