@@ -543,3 +543,70 @@ describe('Test types', () => {
     type verify = Expect<Equal<Expected, Actual>>
   })
 })
+
+describe('Header validation - sensitive data', () => {
+  const app = new Hono()
+
+  app.get('/plain', vValidator('header', v.object({ 'user-agent': v.string() })), (c) =>
+    c.json(c.req.valid('header'))
+  )
+  app.get('/loose', vValidator('header', v.looseObject({ 'user-agent': v.string() })), (c) =>
+    c.json(c.req.valid('header'))
+  )
+  app.get(
+    '/cookie-keyed',
+    vValidator('header', v.object({ cookie: v.pipe(v.string(), v.regex(/^x/)) })),
+    (c) => c.json(c.req.valid('header'))
+  )
+  app.get(
+    '/hook',
+    vValidator('header', v.object({ 'user-agent': v.string() }), (result, c) => {
+      if (!result.success) {
+        return c.json({ hasCookie: JSON.stringify(result).includes('SECRET=123') }, 400)
+      }
+    }),
+    (c) => c.json(c.req.valid('header'))
+  )
+
+  // A GET carrying a session-like Cookie header plus an unrelated header and no user-agent.
+  const request = (path: string) =>
+    app.request(path, {
+      method: 'GET',
+      headers: { Cookie: 'SECRET=123', 'X-Other': 'bar' },
+    })
+
+  it('Should not echo the cookie value in the default 400 body (plain object schema)', async () => {
+    const res = await request('/plain')
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { success: boolean; issues: unknown[] }
+    expect(body.success).toBe(false)
+    expect(body.issues.length).toBeGreaterThan(0)
+    const text = JSON.stringify(body)
+    expect(text).not.toContain('SECRET=123')
+    expect(text).toContain('bar')
+  })
+
+  it('Should not echo the cookie value in the default 400 body (loose object schema)', async () => {
+    const res = await request('/loose')
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { success: boolean; issues: unknown[] }
+    expect(body.success).toBe(false)
+    expect(body.issues.length).toBeGreaterThan(0)
+    expect(JSON.stringify(body)).not.toContain('SECRET=123')
+  })
+
+  it('Should not echo the cookie value when the schema validates the cookie key', async () => {
+    const res = await request('/cookie-keyed')
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { success: boolean; issues: unknown[] }
+    expect(body.success).toBe(false)
+    expect(body.issues.length).toBeGreaterThan(0)
+    expect(JSON.stringify(body)).not.toContain('SECRET=123')
+  })
+
+  it('Should still pass the unsanitized result to a hook', async () => {
+    const res = await request('/hook')
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ hasCookie: true })
+  })
+})
