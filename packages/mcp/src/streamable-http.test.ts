@@ -1856,6 +1856,93 @@ describe('disconnected client', () => {
   })
 })
 
+describe('request state cleanup', () => {
+  let transport: StreamableHTTPTransport
+
+  afterEach(async () => {
+    await stopTestServer({ transport })
+  })
+
+  it('forgets a JSON-mode request once its response has been sent', async () => {
+    // Input: enableJsonResponse is on and a tools/call is answered normally; the same id
+    // is then sent a second result.
+    const result = await createTestServer({
+      sessionIdGenerator: () => crypto.randomUUID(),
+      enableJsonResponse: true,
+    })
+    const server = result.server
+    transport = result.transport
+
+    const initResponse = await sendPostRequest(server, TEST_MESSAGES.initialize)
+    const sessionId = initResponse.headers.get('mcp-session-id') as string
+    expect(sessionId).toBeDefined()
+
+    const response = await sendPostRequest(
+      server,
+      {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'greet', arguments: { name: 'Json' } },
+        id: 'json-cleanup-1',
+      },
+      sessionId
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      jsonrpc: '2.0',
+      id: 'json-cleanup-1',
+      result: { content: [{ type: 'text', text: 'Hello, Json!' }] },
+    })
+
+    await expect(
+      transport.send({ jsonrpc: '2.0', id: 'json-cleanup-1', result: { content: [] } })
+    ).rejects.toThrow(/No connection established/)
+  })
+
+  it('forgets in-flight requests when the transport is closed', async () => {
+    // Input: default SSE mode, a tools/call whose tool never finishes, and close() called
+    // while it is still running.
+    const result = await createTestServer()
+    const server = result.server
+    transport = result.transport
+
+    const initResponse = await sendPostRequest(server, TEST_MESSAGES.initialize)
+    const sessionId = initResponse.headers.get('mcp-session-id') as string
+    expect(sessionId).toBeDefined()
+
+    let started = false
+    const gate = new Promise<void>(() => {
+      // Never resolved: the request stays in flight until the transport is closed
+    })
+    result.mcpServer.tool('never-ends', 'Waits on a gate that is never released', async () => {
+      started = true
+      await gate
+      return { content: [{ type: 'text', text: 'unreachable' }] }
+    })
+
+    const response = await sendPostRequest(
+      server,
+      {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'never-ends', arguments: {} },
+        id: 'close-cleanup-1',
+      },
+      sessionId
+    )
+    expect(response.status).toBe(200)
+    await vi.waitFor(() => {
+      expect(started).toBe(true)
+    })
+
+    await transport.close()
+
+    await expect(
+      transport.send({ jsonrpc: '2.0', id: 'close-cleanup-1', result: { content: [] } })
+    ).rejects.toThrow(/No connection established/)
+  })
+})
+
 // Test stateless mode
 describe('StreamableHTTPServerTransport in stateless mode', () => {
   let server: Hono

@@ -656,6 +656,7 @@ export class StreamableHTTPTransport implements Transport {
 
     // Clear any pending responses
     this.#requestResponseMap.clear()
+    this.#requestToStreamMapping.clear()
     this.onclose?.()
   }
 
@@ -760,7 +761,9 @@ export class StreamableHTTPTransport implements Transport {
           const responses = relatedIds.map((id) => this.#requestResponseMap.get(id)!)
 
           response.ctx.json?.(responses.length === 1 ? responses[0] : responses)
-          return
+          // The HTTP response is resolved, so this stream entry has no further use.
+          // The per-request entries are removed by the loop below.
+          this.#streamMapping.get(streamId)?.cleanup()
         } else {
           response.stream?.abort()
         }
