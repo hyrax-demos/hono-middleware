@@ -10,6 +10,7 @@ import type { Context } from 'hono'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { SSEStreamingApi } from 'hono/streaming'
+import type { Mock } from 'vitest'
 import * as z from 'zod/v4'
 import { StreamableHTTPTransport } from './streamable-http'
 
@@ -1643,7 +1644,7 @@ describe('disconnected client', () => {
   let transport: StreamableHTTPTransport
   let mcpServer: McpServer
   let sessionId: string
-  let onerror: ReturnType<typeof vi.fn>
+  let onerror: Mock<(error: Error) => void>
   // Records SSEStreamingApi#abort, which a cancelled response body triggers
   let abortSpy: { mockClear(): void; mockRestore(): void }
   let releaseTool: () => void
@@ -1678,7 +1679,7 @@ describe('disconnected client', () => {
     transport = result.transport
     mcpServer = result.mcpServer
 
-    onerror = vi.fn()
+    onerror = vi.fn<(error: Error) => void>()
     mcpServer.server.onerror = onerror
 
     const initResponse = await sendPostRequest(server, TEST_MESSAGES.initialize)
@@ -1720,16 +1721,18 @@ describe('disconnected client', () => {
   async function finalSendFor(
     sendSpy: { mock: { calls: unknown[][]; results: { value: unknown }[] } },
     id: string
-  ): Promise<Promise<void>> {
+  ): Promise<{ sendPromise: Promise<void> }> {
+    // Wrapped in an object: returning the promise itself from this async helper would
+    // make callers await its settled value instead of receiving the promise
     let index = -1
     await vi.waitFor(() => {
       index = sendSpy.mock.calls.findIndex(([arg]) => {
         const message = arg as Record<string, unknown>
-        return message.id === id && ('result' in message || 'error' in message)
+        return message['id'] === id && ('result' in message || 'error' in message)
       })
       expect(index).toBeGreaterThanOrEqual(0)
     })
-    return sendSpy.mock.results[index].value as Promise<void>
+    return { sendPromise: sendSpy.mock.results[index].value as Promise<void> }
   }
 
   beforeEach(() => {
@@ -1758,7 +1761,7 @@ describe('disconnected client', () => {
     })
 
     releaseTool()
-    const sendPromise = await finalSendFor(sendSpy, 'call-a')
+    const { sendPromise } = await finalSendFor(sendSpy, 'call-a')
     await expect(sendPromise).resolves.toBeUndefined()
     expect(onerror).not.toHaveBeenCalled()
 
@@ -1801,7 +1804,7 @@ describe('disconnected client', () => {
     })
 
     releaseTool()
-    const sendPromise = await finalSendFor(sendSpy, 'batch-y')
+    const { sendPromise } = await finalSendFor(sendSpy, 'batch-y')
     await expect(sendPromise).resolves.toBeUndefined()
     expect(onerror).not.toHaveBeenCalled()
 
@@ -1837,7 +1840,8 @@ describe('disconnected client', () => {
 
     releaseTool()
     // Only replay is checked here; wait for send to settle so the result is stored
-    await (await finalSendFor(sendSpy, 'call-c')).catch(() => undefined)
+    const { sendPromise } = await finalSendFor(sendSpy, 'call-c')
+    await sendPromise.catch(() => undefined)
 
     const replayResponse = await server.request('/', {
       method: 'GET',
