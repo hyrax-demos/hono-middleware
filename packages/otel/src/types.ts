@@ -25,6 +25,18 @@ export type HttpInstrumentationConfig = {
    * the existing behavior is preserved when this hook is not provided.
    */
   getRoute?: (c: HonoContext) => string | undefined
+  /**
+   * Overrides the value recorded as the `url.full` span attribute. By default
+   * this is the raw request URL (`c.req.url`), query string included, which
+   * may carry credentials or one-time tokens.
+   *
+   * Returning a non-empty string records that string as `url.full`.
+   * Returning `undefined` or an empty string, or throwing, omits `url.full`
+   * from the span; once this hook is set the raw URL is never recorded as a
+   * fallback. The hook is called once per request when the span is started,
+   * and is not called when tracing is disabled.
+   */
+  getUrlFull?: (c: HonoContext) => string | undefined
   serviceName?: string
   serviceVersion?: string
 }

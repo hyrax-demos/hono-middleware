@@ -45,6 +45,29 @@ There are no default values for these properties so if you want to set these att
 `captureRequestHeaders`, `captureResponseHeaders`.
 This is an array of header names that should be captured as part of the span. By default, no headers are captured. The captured headers are represented as span attributes under the `http.request.header` key, `http.request.header.x-forwarded-for=["1.2.3.4", "1.2.3.5"]`.
 
+### Controlling the `url.full` attribute
+
+`getUrlFull: (c: HonoContext) => string | undefined`
+By default the `url.full` span attribute contains the full request URL (`c.req.url`), including the query string. Query strings and paths may carry credentials or one-time tokens (for example password-reset or invitation links), so you can pass a `getUrlFull` function to control or redact the recorded value.
+
+- If it returns a non-empty string, that string is recorded as `url.full`.
+- If it returns `undefined` or an empty string, `url.full` is omitted from the span.
+- If it throws, the error is caught, `url.full` is omitted and the request continues normally.
+
+Once `getUrlFull` is set, the raw URL is never recorded as a fallback. It is not called when `disableTracing` is `true`. When `getUrlFull` is not set, the default behavior is unchanged.
+
+```ts
+app.use(
+  httpInstrumentationMiddleware({
+    getUrlFull: (c) => {
+      const url = new URL(c.req.url)
+      if (url.searchParams.has('token')) url.searchParams.set('token', 'REDACTED')
+      return url.toString()
+    },
+  })
+)
+```
+
 ## Advanced options
 
 ### `tracerProvider`, `meterProvider`, `tracer`
