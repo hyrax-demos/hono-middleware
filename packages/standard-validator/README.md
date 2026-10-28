@@ -115,6 +115,8 @@ This validator returns ungrouped errors, which can be inconvenient when mapping 
 }
 ```
 
+For header validation, the `cookie` header is removed from `data` and from issue payloads in this default response; hooks still receive the raw values.
+
 To group them, use `flattenErrors` inside a `sValidator` hook:
 
 ```ts

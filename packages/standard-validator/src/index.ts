@@ -3,10 +3,15 @@ import type { Context, Env, Input, TypedResponse, ValidationTargets } from 'hono
 import type { Handler } from 'hono/types'
 import { validator } from 'hono/validator'
 import type { InferInput } from 'hono/validator'
-import { sanitizeIssues } from './sanitize-issues'
+import { sanitizeData, sanitizeIssues } from './sanitize-issues'
 
 type HasUndefined<T> = undefined extends T ? true : false
 
+/**
+ * Default 400 response returned when validation fails and no hook handles the result.
+ * For the `header` target the `cookie` header is omitted from `data`
+ * (and from issue payloads, as before).
+ */
 export type FailedResponse<T> = Response &
   TypedResponse<
     {
@@ -154,7 +159,10 @@ const sValidator = <
     if (result.issues) {
       const processedIssues = sanitizeIssues(result.issues, schema['~standard'].vendor, target)
 
-      return c.json({ data: value, error: processedIssues, success: false }, 400)
+      return c.json(
+        { data: sanitizeData(value, target), error: processedIssues, success: false },
+        400
+      )
     }
 
     return (result as { value: StandardSchemaV1.InferOutput<Schema> }).value

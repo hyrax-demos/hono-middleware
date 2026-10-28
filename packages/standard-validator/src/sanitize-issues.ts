@@ -36,15 +36,172 @@ export function sanitizeIssues(
   const restrictedFields =
     RESTRICTED_DATA_FIELDS[target as keyof typeof RESTRICTED_DATA_FIELDS] || []
 
+  let sanitized = issues
+
   if (vendor === 'arktype') {
-    return sanitizeArktypeIssues(issues, restrictedFields)
+    sanitized = sanitizeArktypeIssues(issues, restrictedFields)
   }
 
   if (vendor === 'valibot') {
-    return sanitizeValibotIssues(issues, restrictedFields)
+    sanitized = sanitizeValibotIssues(issues, restrictedFields)
   }
 
-  return issues
+  return redactRestrictedPathIssues(sanitized, vendor, restrictedFields)
+}
+
+/**
+ * Removes restricted fields from the validated input before it is echoed back
+ * in the default error response.
+ *
+ * For targets listed in `RESTRICTED_DATA_FIELDS` (the `cookie` header for the
+ * `header` target) a plain-object `value` is returned as a new object without
+ * those keys. Any other target or value is returned unchanged.
+ *
+ * @param value - The validated input (e.g. the request header record)
+ * @param target - The validation target being processed ('header', 'json', etc.)
+ * @returns `value`, or a copy of it without the restricted keys
+ */
+export function sanitizeData<T>(value: T, target: keyof ValidationTargets): T {
+  if (!(target in RESTRICTED_DATA_FIELDS) || !isPlainObject(value)) {
+    return value
+  }
+
+  const restrictedFields = RESTRICTED_DATA_FIELDS[target as keyof typeof RESTRICTED_DATA_FIELDS]
+
+  return omitKeys(value, restrictedFields) as T
+}
+
+const REDACTED = '[redacted]'
+const REDACTED_STRING_FIELDS = ['message', 'received', 'actual', 'problem', 'expected']
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function omitKeys(obj: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(obj).filter(([key]) => !keys.includes(key)))
+}
+
+function pathItemKey(item: unknown): unknown {
+  return isRecord(item) ? item['key'] : item
+}
+
+/**
+ * Redacts the raw value of issues whose path points at a restricted field
+ * (e.g. a schema that validates the `cookie` header itself). Such issues can
+ * carry the raw value in `input`, in path items' `value`/`input`, in arktype's
+ * `data`, or inside `message`/`received`. Issues are copied, keeping their
+ * prototype so that e.g. arktype's `toJSON` keeps working.
+ */
+function redactRestrictedPathIssues(
+  issues: readonly StandardSchemaV1.Issue[],
+  vendor: string,
+  restrictedFields: readonly string[]
+): readonly StandardSchemaV1.Issue[] {
+  const reachesRestricted = (issue: StandardSchemaV1.Issue): boolean => {
+    const key = pathItemKey(issue.path?.[0])
+    return typeof key === 'string' && restrictedFields.includes(key)
+  }
+
+  if (!issues.some(reachesRestricted)) {
+    return issues
+  }
+
+  const redactIssue = (issue: StandardSchemaV1.Issue): StandardSchemaV1.Issue => {
+    const raw = issue as unknown as Record<string, unknown>
+    const rawValues = new Set<string>()
+
+    // arktype's own `input` is its error context, not the validated value.
+    const dropInput = vendor !== 'arktype'
+    if (dropInput && typeof raw['input'] === 'string') {
+      rawValues.add(raw['input'])
+    }
+    if (vendor === 'arktype' && typeof raw['data'] === 'string') {
+      rawValues.add(raw['data'])
+    }
+
+    // Array.from rather than .map: arktype paths are an Array subclass. Only used
+    // when some path item is an object (valibot); plain key paths are kept as is.
+    const path = Array.from(issue.path ?? [], (item) => {
+      if (!isRecord(item)) {
+        return item
+      }
+      const key = item['key']
+      if (typeof item['value'] === 'string') {
+        rawValues.add(item['value'])
+      }
+      if (isRecord(item['input']) && typeof key === 'string') {
+        const restrictedValue = item['input'][key]
+        if (typeof restrictedValue === 'string') {
+          rawValues.add(restrictedValue)
+        }
+      }
+      const rest = omitKeys(item, ['value'])
+      return isRecord(item['input'])
+        ? { ...rest, input: omitKeys(item['input'], restrictedFields) }
+        : rest
+    })
+
+    const ownFields = Object.fromEntries(
+      Object.entries(raw).filter(([field]) => !(dropInput && field === 'input'))
+    )
+    const proto = Object.getPrototypeOf(issue) as object | null
+    const redacted = Object.create(proto) as Record<string, unknown>
+    // defineProperty also shadows getter-only fields on the prototype
+    const setOwn = (field: string, value: unknown) => {
+      Object.defineProperty(redacted, field, {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+    for (const [field, value] of Object.entries(ownFields)) {
+      setOwn(field, value)
+    }
+    if (issue.path?.some(isRecord)) {
+      setOwn('path', path)
+    }
+    if (vendor === 'arktype' && typeof raw['data'] === 'string') {
+      setOwn('data', REDACTED)
+    }
+    // arktype spreads its error context into toJSON; drop raw-value fields from it.
+    if (vendor === 'arktype' && isRecord(raw['input'])) {
+      setOwn('input', omitKeys(raw['input'], ['data', 'actual', 'problem', 'message']))
+    }
+
+    const redactString = (text: string): string => {
+      let result = text
+      for (const rawValue of rawValues) {
+        if (rawValue !== '') {
+          result = result.split(rawValue).join(REDACTED)
+        }
+      }
+      return result
+    }
+
+    for (const field of REDACTED_STRING_FIELDS) {
+      const text = redacted[field]
+      if (typeof text === 'string') {
+        const replaced = redactString(text)
+        if (replaced !== text) {
+          setOwn(field, replaced)
+        }
+      }
+    }
+
+    return redacted as unknown as StandardSchemaV1.Issue
+  }
+
+  return Array.from(issues, (issue) => (reachesRestricted(issue) ? redactIssue(issue) : issue))
 }
 
 function sanitizeArktypeIssues(

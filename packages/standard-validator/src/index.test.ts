@@ -1,9 +1,12 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
+import { type } from 'arktype'
 import { Hono } from 'hono'
 import type { ExtractSchema } from 'hono/types'
 import type { SuccessStatusCode } from 'hono/utils/http-status'
 import type { Equal, Expect, UnionToIntersection } from 'hono/utils/types'
+import * as v from 'valibot'
 import { vi } from 'vitest'
+import { z } from 'zod'
 
 import * as arktypeSchemas from '../__schemas__/arktype'
 import * as valibotSchemas from '../__schemas__/valibot'
@@ -484,6 +487,71 @@ describe('Standard Schema Validation', () => {
               )
             ).toBe(false)
           }
+        })
+
+        // Request carries a Cookie header and another header but no User-Agent,
+        // so the required header schema fails and the default 400 body is used.
+        const cookieRequest = () =>
+          new Request('http://localhost/headers', {
+            headers: {
+              Cookie: 'SECRET=123',
+              'X-Other': 'bar',
+            },
+          })
+
+        it('removes the cookie header from data in the default 400 body', async () => {
+          const app = new Hono()
+
+          app.get('/headers', sValidator('header', schemas.headerSchema), (c) =>
+            c.json({ success: true })
+          )
+
+          const res = await app.request(cookieRequest())
+          expect(res.status).toBe(400)
+          const body = (await res.json()) as { data: Record<string, string> }
+          expect(body.data.cookie).toBeUndefined()
+          expect(body.data['x-other']).toBe('bar')
+          expect(JSON.stringify(body)).not.toContain('SECRET=123')
+        })
+
+        it('still passes the raw cookie header to a hook', async () => {
+          const app = new Hono()
+
+          app.get(
+            '/headers',
+            sValidator('header', schemas.headerSchema, (result, c) =>
+              c.json(
+                { hasCookie: (result.data as Record<string, string>).cookie === 'SECRET=123' },
+                400
+              )
+            ),
+            (c) => c.json({ success: true })
+          )
+
+          const res = await app.request(cookieRequest())
+          expect(res.status).toBe(400)
+          const body = (await res.json()) as { hasCookie: boolean }
+          expect(body.hasCookie).toBe(true)
+        })
+
+        it('does not echo the cookie when the schema validates the cookie header', async () => {
+          // Cookie value 'SECRET=123' does not match /^x/, so the issue is about the cookie itself.
+          const cookieSchemas: Record<typeof lib, StandardSchemaV1> = {
+            valibot: v.object({ cookie: v.pipe(v.string(), v.regex(/^x/)) }),
+            zod: z.object({ cookie: z.string().regex(/^x/) }),
+            arktype: type({ cookie: /^x/ }),
+          }
+          const app = new Hono()
+
+          app.get('/headers', sValidator('header', cookieSchemas[lib]), (c) =>
+            c.json({ success: true })
+          )
+
+          const res = await app.request(cookieRequest())
+          expect(res.status).toBe(400)
+          const body = (await res.json()) as { data: Record<string, string> }
+          expect(body.data['x-other']).toBe('bar')
+          expect(JSON.stringify(body)).not.toContain('SECRET=123')
         })
       })
     })
