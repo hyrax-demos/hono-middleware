@@ -1014,7 +1014,7 @@ describe('MCP helper', () => {
         body: JSON.stringify(TEST_MESSAGES.toolsList),
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
@@ -1060,7 +1060,7 @@ describe('MCP helper', () => {
         },
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
@@ -1081,13 +1081,113 @@ describe('MCP helper', () => {
         },
       })
 
-      expect(response.status).toBe(404)
+      expect(response.status).toBe(400)
       const errorData = await response.json()
       expectErrorResponse(
         errorData,
         -32000,
         /Bad Request: Unsupported protocol version \(supported versions: .+\)/
       )
+    })
+
+    it('should answer an unsupported version with 400, not 404, for a valid session', async () => {
+      // A 404 on a request carrying Mcp-Session-Id tells the client its session
+      // expired, so a version refusal must not use it. Input: the live session
+      // id together with the unlisted version 2026-06-18.
+      sessionId = await initializeServer()
+
+      const response = await server.request('/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          'mcp-session-id': sessionId,
+          'mcp-protocol-version': '2026-06-18',
+        },
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Unsupported protocol version \(supported versions: .+\)/
+      )
+    })
+
+    it('should reject a repeated MCP-Protocol-Version header with 400', async () => {
+      // Input: the header sent twice with two supported values; Headers.get
+      // joins them into "2025-03-26, 2024-11-05", which is not a listed version.
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-session-id', sessionId],
+        ['mcp-protocol-version', '2025-03-26'],
+        ['mcp-protocol-version', '2024-11-05'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Unsupported protocol version \(supported versions: .+\)/
+      )
+    })
+  })
+
+  describe('session id header validation', () => {
+    it('should reject a repeated Mcp-Session-Id header with 400, not 404', async () => {
+      // Input: the valid session id sent twice; Headers.get joins it into
+      // "<id>, <id>", which must be reported as malformed, not as an unknown session.
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['mcp-session-id', sessionId],
+        ['mcp-session-id', sessionId],
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-protocol-version', '2025-03-26'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(400)
+      const errorData = await response.json()
+      expectErrorResponse(
+        errorData,
+        -32000,
+        /Bad Request: Mcp-Session-Id header must be a single value/
+      )
+    })
+
+    it('should still accept a single valid Mcp-Session-Id header', async () => {
+      sessionId = await initializeServer()
+
+      const headers = new Headers([
+        ['mcp-session-id', sessionId],
+        ['content-type', 'application/json'],
+        ['accept', 'application/json, text/event-stream'],
+        ['mcp-protocol-version', '2025-03-26'],
+      ])
+      const response = await server.request('/', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(TEST_MESSAGES.toolsList),
+      })
+
+      expect(response.status).toBe(200)
     })
   })
 })

@@ -593,7 +593,13 @@ export class StreamableHTTPTransport implements Transport {
       })
     }
 
-    if (Array.isArray(sessionId)) {
+    if (sessionId === this.sessionId) {
+      return true
+    }
+
+    // Headers.get joins repeated fields as "a, b". A non-matching value with a
+    // comma is a malformed request, not an unknown session, so answer 400.
+    if (sessionId.includes(',')) {
       throw new HTTPException(400, {
         res: Response.json({
           jsonrpc: '2.0',
@@ -606,32 +612,26 @@ export class StreamableHTTPTransport implements Transport {
       })
     }
 
-    if (sessionId !== this.sessionId) {
-      // Reject requests with invalid session ID with 404 Not Found
-      throw new HTTPException(404, {
-        res: Response.json({
-          jsonrpc: '2.0',
-          error: {
-            code: ErrorCode.RequestTimeout,
-            message: 'Session not found',
-          },
-          id: null,
-        }),
-      })
-    }
-
-    return true
+    // Reject requests with invalid session ID with 404 Not Found
+    throw new HTTPException(404, {
+      res: Response.json({
+        jsonrpc: '2.0',
+        error: {
+          code: ErrorCode.RequestTimeout,
+          message: 'Session not found',
+        },
+        id: null,
+      }),
+    })
   }
 
   #validateProtocolVersion(ctx: Context): boolean {
-    let protocolVersion =
+    // Headers.get joins repeated fields as "a, b", so a repeated header is rejected as unsupported
+    const protocolVersion =
       ctx.req.header('mcp-protocol-version') ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION
-    if (Array.isArray(protocolVersion)) {
-      protocolVersion = protocolVersion[protocolVersion.length - 1]
-    }
 
     if (!SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)) {
-      throw new HTTPException(404, {
+      throw new HTTPException(400, {
         res: Response.json({
           jsonrpc: '2.0',
           error: {
